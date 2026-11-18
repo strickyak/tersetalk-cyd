@@ -1,0 +1,77 @@
+#ifndef TT_HOST_BUILD
+
+#include <Arduino.h>
+
+#include "hal/hal_cyd.h"
+#include "ui/tt_serial.h"
+#include "ui/tt_wm.h"
+#include "vm/tt_vm.h"
+#include "vm/tt_world.h"
+
+#include <cstdio>
+
+namespace {
+
+tt::HalCyd         gHal;
+tt::VM*            gVm   = nullptr;
+tt::WindowManager* gWm   = nullptr;
+tt::SerialRepl*    gRepl = nullptr;
+
+}  // namespace
+
+void setup() {
+  gHal.init();
+
+  gVm = new tt::VM();
+
+  // ESP32 DRAM is split into two non-contiguous regions (~110 KB max single block).
+  // Size the contiguous object-header arena from ESP.getMaxAllocHeap(), leaving
+  // the remaining >120 KB of heap across both banks for RAM bytecodes, Lists, Dicts, and Bmps!
+  size_t maxContig = ESP.getMaxAllocHeap();
+  uint32_t arenaBytes = 90112u;  // 88 KB target (~57 KB used with 7 apps open!)
+  if (maxContig < arenaBytes + 12288u) {
+    size_t safe = (maxContig > 20480u) ? (maxContig - 12288u) : (maxContig * 3u / 4u);
+    arenaBytes = static_cast<uint32_t>(safe & ~7u);
+  }
+
+  if (!gVm->init(arenaBytes, false)) {
+    gHal.clear(tt::Color::kRed);
+    char msg[80];
+    std::snprintf(msg, sizeof(msg), "VM Init Failed (%u / %u)",
+                  static_cast<unsigned>(arenaBytes), static_cast<unsigned>(maxContig));
+    gHal.drawText(8, 20, msg, tt::Color::kWhite);
+    return;
+  }
+  gHal.attachToVm(*gVm);
+
+  // 1. Load immutable prelude from /flash/prelude.tt (falling back to embedded .rodata)
+  std::string err;
+  if (!tt::loadWorldFile(*gVm, "pre0", "/flash/prelude.tt", &err)) {
+    if (!tt::loadWorldBuffer(*gVm, "pre0", tt::kEmbeddedPrelude, tt::kEmbeddedPreludeLen, true, &err)) {
+      gHal.drawTextClipped(4, 4, 312, ("Prelude err: " + err).c_str(), tt::Color::kOrange);
+    }
+  }
+
+  // 2. Replay mutable user world log from MicroSD (/sd/worlds/w_main.tt) if present
+  if (gHal.isSdMounted()) {
+    std::string probe;
+    if (gVm->readVfsFile("/sd/worlds/w_main.tt", probe)) {
+      tt::loadWorldBuffer(*gVm, "main", probe.data(), probe.size(), false, &err);
+    }
+  }
+
+  gWm   = new tt::WindowManager(*gVm, gHal);
+  gRepl = new tt::SerialRepl(*gVm, gHal, *gWm);
+
+  gWm->initDesktop();
+  gWm->render();
+  gRepl->printBanner();
+}
+
+void loop() {
+  if (gWm) gWm->tick();
+  if (gRepl) gRepl->poll();
+  delay(4);
+}
+
+#endif  // !TT_HOST_BUILD

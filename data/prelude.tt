@@ -1,0 +1,600 @@
+# TerseTalk-CYD Immutable Flash Prelude (/flash/prelude.tt)
+# Directive lines start at column 0; body lines are indented by 1 space.
+
+meth Obj flattenTo:
+ a ap: me. me
+
+meth Obj toJson
+ Json en: me
+
+meth Str deHex
+ Hex de: me
+
+meth Str fromJson
+ Json de: me
+
+meth Bytes hex
+ Hex en: me
+
+meth ListCls range:
+ a range
+
+meth ListCls pairs:
+ z = List new.
+ FOR(k, v: a) DO(z at: k put: v).
+ z
+
+meth List map:
+ FOR(x: me) MAP(a value: x)
+
+meth List filter:
+ FOR(x: me) IF(a value: x) MAP(x)
+
+meth List sel:
+ me filter: a
+
+meth List each:
+ FOR(x: me) DO(a value: x).
+ me
+
+meth List sum
+ s = 0.
+ FOR(x: me) DO(s = s + x).
+ s
+
+meth List min
+ IF(me len == 0) THEN(nil) ELSE(
+  m = me at: 0.
+  FOR(x: me) DO(IF(x < m) THEN(m = x)).
+  m)
+
+meth List max
+ IF(me len == 0) THEN(nil) ELSE(
+  m = me at: 0.
+  FOR(x: me) DO(IF(x > m) THEN(m = x)).
+  m)
+
+meth List any:
+ r = 0.
+ FOR(x: me) DO(IF(a value: x) THEN(r = 1)).
+ r
+
+meth List all:
+ r = 1.
+ FOR(x: me) DO(IF((a value: x) not) THEN(r = 0)).
+ r
+
+meth Usr nonMain
+ me
+
+# ===========================================================================
+# Windowed App Framework (`App`)
+#   Current App = owning App of topmost window; populates NE Wedge Dropdown!
+# ===========================================================================
+cls App Usr
+
+vars App
+ myWin
+
+meth AppCls open
+ app = me new init.
+ w = Win open: app title: (app title).
+ app myWin: w $ onStart.
+ w
+
+meth App init
+ me
+
+meth App title
+ me cls name
+
+meth App onStart
+ me
+
+meth App onClose
+ me
+
+meth App onPaint:
+ a clear
+
+meth App onTouch:at:
+ me
+
+meth App onTick
+ me
+
+meth App appMenu
+ List new
+
+meth App dirty
+ IF(myWin) THEN(myWin dirty).
+ me
+
+# ===========================================================================
+# 1. GraphApp: Interactive Function Plotter (`y = f(x)`)
+# ===========================================================================
+cls GraphApp App
+
+vars GraphApp
+ expr expr2 span
+
+meth GraphApp title
+ 'Graph Plotter'
+
+meth GraphApp init
+ expr = 'x sin + ((x * 3) sin / 3)'.
+ expr2 = '(x * 0.5) cos * 0.8'.
+ span = 6.28.
+ me
+
+meth GraphApp onPaint:
+ p = a.
+ ym = span * (p hei) / (p wid).
+ p clear: 001 $ world: (span neg) @ (ym neg) to: span @ ym $ axes.
+ IF(expr2) THEN(
+  fn2 = me eval: 'FN(x: ' + expr2 + ')'.
+  p color: 068 $ plot: fn2).
+ fn1 = me eval: 'FN(x: ' + expr + ')'.
+ p yellow plot: fn1.
+ p cyan text: 'y=' + expr at: 4 @ (p hei - 10)
+
+meth GraphApp onTouch:at:
+ IF(a == 'down') THEN(
+  me zoomIn)
+
+meth GraphApp editFn
+ Win prompt: 'Plot y = f(x)' init: expr then: FN(s:
+  expr = s.
+  me dirty)
+
+meth GraphApp presetFourier
+ expr = 'x sin + ((x * 3) sin / 3) + ((x * 5) sin / 5)'.
+ expr2 = 'x sgn'.
+ me dirty
+
+meth GraphApp presetSinc
+ expr = 'IF(x abs < 0.01) THEN(3.0) ELSE((x * 3) sin / x)'.
+ expr2 = nil.
+ span = 8.0.
+ me dirty
+
+meth GraphApp presetDamped
+ expr = '(x abs * -0.35) exp * ((x * 4) cos) * 2'.
+ expr2 = '(x abs * -0.35) exp * 2'.
+ span = 6.5.
+ me dirty
+
+meth GraphApp zoomIn
+ span = (span * 0.65) max: 0.25.
+ me dirty
+
+meth GraphApp zoomOut
+ span = (span * 1.5) min: 40.0.
+ me dirty
+
+meth GraphApp resetView
+ span = 6.28.
+ me dirty
+
+meth GraphApp appMenu
+ LIST(
+  'Edit f(x)...'   @ 'editFn';
+  'Fourier Square' @ 'presetFourier';
+  'Sinc sin(3x)/x' @ 'presetSinc';
+  'Damped Cosine'  @ 'presetDamped';
+  'Zoom In'        @ 'zoomIn';
+  'Zoom Out'       @ 'zoomOut';
+  'Reset View'     @ 'resetView'
+ )
+
+# ===========================================================================
+# 2. SpiroApp: Rainbow Hypotrochoid Spirograph Explorer
+# ===========================================================================
+cls SpiroApp App
+
+vars SpiroApp
+ rBig rSmall dOff phase spinning presetIdx
+
+meth SpiroApp title
+ 'Spirograph'
+
+meth SpiroApp init
+ rBig = 7.0.
+ rSmall = 3.0.
+ dOff = 4.5.
+ phase = 0.0.
+ spinning = 0.
+ presetIdx = 0.
+ me
+
+meth SpiroApp onPaint:
+ p = a.
+ p clear: 000.
+ cx = p wid * 0.5.
+ cy = p hei * 0.5.
+ rad = ((cx min: cy) - 8) / (rBig - rSmall + dOff).
+ steps = 210.
+ tmax = Num tau * 3.0.
+ diff = rBig - rSmall.
+ ratio = diff / rSmall.
+ px = 0. py = 0.
+ FOR(i: steps + 1) DO(
+  t = tmax * i / steps.
+  ang = t * ratio + phase.
+  wx = (diff * (t cos)) + (dOff * (ang cos)).
+  wy = (diff * (t sin)) - (dOff * (ang sin)).
+  sx = cx + (wx * rad).
+  sy = cy - (wy * rad).
+  IF(i > 0) THEN(
+   p hue: (i * 360 / steps) $ line: px @ py to: sx @ sy).
+  px = sx. py = sy).
+ p gray text: 'R=[rBig int] r=[rSmall int] d=[dOff fmt: 1]' at: 4 @ (p hei - 10)
+
+meth SpiroApp onTick
+ phase = phase + 0.14.
+ me
+
+meth SpiroApp onTouch:at:
+ IF(a == 'down') THEN(me nextPreset)
+
+meth SpiroApp nextPreset
+ presetIdx = (presetIdx + 1) % 4.
+ CASE(presetIdx) OF(
+  0, (rBig = 7.0. rSmall = 3.0. dOff = 4.5);
+  1, (rBig = 8.0. rSmall = 5.0. dOff = 6.0);
+  2, (rBig = 9.0. rSmall = 2.0. dOff = 3.5);
+  3, (rBig = 11.0. rSmall = 4.0. dOff = 5.2)).
+ me dirty
+
+meth SpiroApp toggleSpin
+ spinning = spinning not.
+ IF(myWin) THEN(myWin every: (IF(spinning) THEN(75) ELSE(0))).
+ me
+
+meth SpiroApp morePetals
+ rBig = rBig + 1.0.
+ me dirty
+
+meth SpiroApp fewerPetals
+ rBig = (rBig - 1.0) max: (rSmall + 1.0).
+ me dirty
+
+meth SpiroApp appMenu
+ LIST(
+  'Next Curve'   @ 'nextPreset';
+  'Spin / Pause' @ 'toggleSpin';
+  'More Petals'  @ 'morePetals';
+  'Fewer Petals' @ 'fewerPetals'
+ )
+
+# ===========================================================================
+# 3. TurtleApp: Recursive Fractals & Turtle Geometry
+# ===========================================================================
+cls TurtleApp App
+
+vars TurtleApp
+ mode depth angle
+
+meth TurtleApp title
+ 'Turtle Fractals'
+
+meth TurtleApp init
+ mode = 0.
+ depth = 7.
+ angle = 26.
+ me
+
+meth TurtleApp tree:len:d:
+ p = a. len = b. d = c.
+ IF(d > 0) THEN(
+  p hue: (140 - (d * 18)) $ go: len.
+  savedPos = p pos.
+  savedHd = p heading.
+  p turn: angle.
+  me tree: p len: (len * 0.72) d: (d - 1).
+  p jump: savedPos $ head: (savedHd - angle).
+  me tree: p len: (len * 0.72) d: (d - 1).
+  p jump: savedPos $ head: savedHd)
+
+meth TurtleApp koch:len:d:
+ p = a. len = b. d = c.
+ IF(d <= 0) THEN(p go: len) ELSE(
+  s = len / 3.0.
+  me koch: p len: s d: (d - 1).
+  p turn: 60.
+  me koch: p len: s d: (d - 1).
+  p rt: 120.
+  me koch: p len: s d: (d - 1).
+  p turn: 60.
+  me koch: p len: s d: (d - 1))
+
+meth TurtleApp onPaint:
+ p = a.
+ p clear: 001 $ home.
+ CASE(mode) OF(
+  0, (
+   p jump: (p wid * 0.5) @ (p hei - 8) $ head: 90 $ down.
+   me tree: p len: (p hei * 0.27) d: depth.
+   p yellow text: 'Tree d=[depth] ang=[angle]' at: 4 @ 4);
+  1, (
+   sz = (p wid min: p hei) * 0.72.
+   kd = depth min: 4.
+   p jump: ((p wid - sz) * 0.5) @ (p hei * 0.28) $ head: 0 $ down $ cyan.
+   FOR(i: 3) DO(
+    p hue: (180 + (i * 45)).
+    me koch: p len: sz d: kd.
+    p rt: 120).
+   p yellow text: 'Koch Snowflake d=[kd]' at: 4 @ 4);
+  2, (
+   p home $ down.
+   FOR(i: 95) DO(
+    p hue: (i * 4) $ go: (i * 1.4) $ turn: (89 + (angle % 7))).
+   p yellow text: 'Poly Spiral ang=[89 + (angle % 7)]' at: 4 @ 4))
+
+meth TurtleApp onTouch:at:
+ IF(a == 'down') THEN(
+  angle = 14 + ((b x * 40 / 240) int).
+  me dirty)
+
+meth TurtleApp modeTree
+ mode = 0. depth = 7. me dirty
+
+meth TurtleApp modeSnow
+ mode = 1. depth = 4. me dirty
+
+meth TurtleApp modeSpiral
+ mode = 2. me dirty
+
+meth TurtleApp incDepth
+ depth = (depth + 1) min: 9. me dirty
+
+meth TurtleApp decDepth
+ depth = (depth - 1) max: 1. me dirty
+
+meth TurtleApp appMenu
+ LIST(
+  'Fractal Tree'   @ 'modeTree';
+  'Koch Snowflake' @ 'modeSnow';
+  'Poly Spiral'    @ 'modeSpiral';
+  'Depth +1'       @ 'incDepth';
+  'Depth -1'       @ 'decDepth'
+ )
+
+# ===========================================================================
+# 4. MandelApp: Tap-to-Zoom Mandelbrot Set Explorer (on 8-Bit Bmp)
+# ===========================================================================
+cls MandelApp App
+
+vars MandelApp
+ pixBuf cx cy span maxIter dirtyFractal
+
+meth MandelApp title
+ 'Mandelbrot'
+
+meth MandelApp init
+ pixBuf = Bmp wid: 96 hei: 72.
+ cx = -0.6.
+ cy = 0.0.
+ span = 2.8.
+ maxIter = 48.
+ dirtyFractal = 1.
+ me
+
+meth MandelApp recompute
+ sy = span * (pixBuf hei) / (pixBuf wid).
+ pixBuf mandel: cx @ cy span: span @ sy max: maxIter.
+ dirtyFractal = 0
+
+meth MandelApp onPaint:
+ p = a.
+ IF(dirtyFractal) THEN(me recompute).
+ p blit: pixBuf.
+ p white text: 'Tap zoom | span=[span fmt: 4]' at: 4 @ (p hei - 10)
+
+meth MandelApp onTouch:at:
+ IF(a == 'down') THEN(
+  w = (myWin wid) max: 1.
+  h = (myWin hei) max: 1.
+  sy = span * h / w.
+  cx = (cx - (span * 0.5)) + ((b x) / w * span).
+  cy = (cy - (sy * 0.5)) + ((1.0 - ((b y) / h)) * sy).
+  span = span * 0.5.
+  maxIter = (maxIter + 12) min: 180.
+  dirtyFractal = 1.
+  me dirty)
+
+meth MandelApp zoomIn
+ span = span * 0.5.
+ maxIter = (maxIter + 10) min: 180.
+ dirtyFractal = 1. me dirty
+
+meth MandelApp zoomOut
+ span = (span * 2.0) min: 4.0.
+ dirtyFractal = 1. me dirty
+
+meth MandelApp gotoSeahorse
+ cx = -0.7453. cy = 0.1127. span = 0.018. maxIter = 128.
+ dirtyFractal = 1. me dirty
+
+meth MandelApp hiRes
+ pixBuf = Bmp wid: 160 hei: 120.
+ maxIter = (maxIter max: 80).
+ dirtyFractal = 1. me dirty
+
+meth MandelApp resetView
+ pixBuf = Bmp wid: 96 hei: 72.
+ cx = -0.6. cy = 0.0. span = 2.8. maxIter = 48.
+ dirtyFractal = 1. me dirty
+
+meth MandelApp appMenu
+ LIST(
+  'Zoom In 2x'      @ 'zoomIn';
+  'Zoom Out 2x'     @ 'zoomOut';
+  'Seahorse Valley' @ 'gotoSeahorse';
+  'Hi-Res 160x120'  @ 'hiRes';
+  'Reset View'      @ 'resetView'
+ )
+
+# ===========================================================================
+# 5. LifeApp: Animated Toroidal Conway's Game of Life
+# ===========================================================================
+cls LifeApp App
+
+vars LifeApp
+ cur nxt running gen
+
+meth LifeApp title
+ 'Conway Life'
+
+meth LifeApp init
+ cur = Bmp wid: 64 hei: 48.
+ nxt = Bmp wid: 64 hei: 48.
+ running = 1.
+ gen = 0.
+ me randomize
+
+meth LifeApp onStart
+ IF(myWin) THEN(myWin every: 90).
+ me
+
+meth LifeApp randomize
+ cur clear.
+ FOR(y: 48) DO(
+  FOR(x: 64) DO(
+   IF((Num rand: 5) == 0) THEN(cur at: x y: y put: 40))).
+ gen = 0.
+ me dirty
+
+meth LifeApp stepOnce
+ nxt lifeFrom: cur.
+ cur, nxt = nxt, cur.
+ gen = gen + 1.
+ me dirty
+
+meth LifeApp onTick
+ IF(running) THEN(me stepOnce)
+
+meth LifeApp onPaint:
+ p = a.
+ p blit: cur.
+ p yellow text: 'Gen [gen]' at: 4 @ (p hei - 10)
+
+meth LifeApp onTouch:at:
+ IF(OR(a == 'down'; a == 'move')) THEN(
+  w = (myWin wid) max: 1.
+  h = (myWin hei) max: 1.
+  gx = ((b x) * 64 / w) int.
+  gy = ((b y) * 48 / h) int.
+  cur at: gx y: gy put: 64.
+  cur at: (gx + 1) y: gy put: 64.
+  me dirty)
+
+meth LifeApp toggleRun
+ running = running not.
+ IF(myWin) THEN(myWin every: (IF(running) THEN(90) ELSE(0))).
+ me
+
+meth LifeApp glider
+ cx = 10. cy = 10.
+ cur at: (cx + 1) y: cy put: 80.
+ cur at: (cx + 2) y: (cy + 1) put: 80.
+ cur at: cx y: (cy + 2) put: 80.
+ cur at: (cx + 1) y: (cy + 2) put: 80.
+ cur at: (cx + 2) y: (cy + 2) put: 80.
+ me dirty
+
+meth LifeApp clearGrid
+ cur clear. gen = 0. me dirty
+
+meth LifeApp appMenu
+ LIST(
+  'Play / Pause' @ 'toggleRun';
+  'Single Step'  @ 'stepOnce';
+  'Random Soup'  @ 'randomize';
+  'Spawn Glider' @ 'glider';
+  'Clear Grid'   @ 'clearGrid'
+ )
+
+# ===========================================================================
+# 6. PaintApp: Stylus & Kaleidoscope Symmetry Sketchpad
+# ===========================================================================
+cls PaintApp App
+
+vars PaintApp
+ canvas bpen palCol thick mirror prevPt
+
+meth PaintApp title
+ 'Paint Pad'
+
+meth PaintApp init
+ canvas = Bmp wid: 160 hei: 112.
+ bpen = canvas pen.
+ bpen clear: 0.
+ palCol = 6.
+ thick = 2.
+ mirror = 1.
+ prevPt = nil.
+ me
+
+meth PaintApp onPaint:
+ p = a.
+ p blit: canvas.
+ p cyan text: (IF(mirror) THEN('Kaleido ON') ELSE('Freehand')) at: 4 @ (p hei - 10)
+
+meth PaintApp strokeFrom:to:
+ p0 = a. p1 = b.
+ w = canvas wid - 1.
+ h = canvas hei - 1.
+ bpen pal: palCol $ thick: thick $ line: p0 to: p1.
+ IF(mirror) THEN(
+  bpen line: (w - (p0 x)) @ (p0 y) to: (w - (p1 x)) @ (p1 y).
+  bpen line: (p0 x) @ (h - (p0 y)) to: (p1 x) @ (h - (p1 y)).
+  bpen line: (w - (p0 x)) @ (h - (p0 y)) to: (w - (p1 x)) @ (h - (p1 y)))
+
+meth PaintApp onTouch:at:
+ w = (myWin wid) max: 1.
+ h = (myWin hei) max: 1.
+ pt = ((b x) * (canvas wid) / w) @ ((b y) * (canvas hei) / h).
+ IF(a == 'down') THEN(
+  prevPt = pt.
+  me strokeFrom: pt to: pt).
+ IF(AND(a == 'move'; prevPt)) THEN(
+  me strokeFrom: prevPt to: pt.
+  prevPt = pt.
+  palCol = 16 + ((palCol - 13) % 200)).
+ IF(a == 'up') THEN(prevPt = nil)
+
+meth PaintApp nextColor
+ palCol = 16 + ((palCol + 29) % 200). me
+
+meth PaintApp toggleThick
+ thick = IF(thick == 1) THEN(3) ELSE(1). me
+
+meth PaintApp toggleMirror
+ mirror = mirror not. me dirty
+
+meth PaintApp clearPad
+ canvas clear. me dirty
+
+meth PaintApp appMenu
+ LIST(
+  'Kaleido On/Off' @ 'toggleMirror';
+  'Next Color'     @ 'nextColor';
+  'Thick / Thin'   @ 'toggleThick';
+  'Clear Canvas'   @ 'clearPad'
+ )
+
+# ===========================================================================
+# Boot Self-Tests
+# ===========================================================================
+equals 42
+ 6 * 7
+
+equals 'hello world'
+ x = 'world'. 'hello [x]'
+
+equals 10 @ 20 @ 30
+ (1 @ 2 @ 3) map: FN(x: x * 10)
+
+equals 55
+ (1 to: 10) sum

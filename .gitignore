@@ -1,0 +1,8 @@
+.pio/
+build/
+__pycache__/
+*.pyc
+*.o
+*.ppm
+*.png
+w_*.tt
