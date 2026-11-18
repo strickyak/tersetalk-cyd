@@ -691,7 +691,8 @@ static Oop primPokeVars(VM& vm, Oop rcvr, const Oop* args, uint8_t) {
         if (h->format == OBJ_SLOTS && i < h->size) {
           reinterpret_cast<ObjSlots*>(h)->slots[i] = v;
         } else if (h->format == OBJ_CLS) {
-          vm.dictPut(reinterpret_cast<ObjCls*>(h)->savedInstsDict, makeInt30(-1 - static_cast<int32_t>(i)), v);
+          Oop sd = vm.ensureSavedInstsDict(reinterpret_cast<ObjCls*>(h));
+          vm.dictPut(sd, makeInt30(-1 - static_cast<int32_t>(i)), v);
         }
         break;
       }
@@ -2264,7 +2265,8 @@ static Oop primUsrClsFind(VM& vm, Oop rcvr, const Oop* args, uint8_t) {
     Oop inst = vm.newUsr(c->clsId);
     TempRootGuard rg(vm, inst);
     reinterpret_cast<ObjSlots*>(objFromOop(inst))->onameSym = ksym;
-    vm.dictPut(c->savedInstsDict, makeSym(ksym), inst);
+    Oop sd = vm.ensureSavedInstsDict(c);
+    vm.dictPut(sd, makeSym(ksym), inst);
     vm.evalCode(inst, code.c_str());
     return inst;
   }

@@ -25,10 +25,10 @@ void setup() {
   gVm = new tt::VM();
 
   // ESP32 DRAM is split into two non-contiguous regions (~110 KB max single block).
-  // Size the contiguous object-header arena from ESP.getMaxAllocHeap(), leaving
-  // the remaining >120 KB of heap across both banks for RAM bytecodes, Lists, Dicts, and Bmps!
+  // Use a 64 KB contiguous object-header arena (~32 KB used at boot), leaving maximum
+  // contiguous heap across both DRAM banks for 8-bit Bmp canvases, Lists, Dicts, and bytecodes!
   size_t maxContig = ESP.getMaxAllocHeap();
-  uint32_t arenaBytes = 90112u;  // 88 KB target (~57 KB used with 7 apps open!)
+  uint32_t arenaBytes = 65536u;  // 64 KB object-header arena
   if (maxContig < arenaBytes + 12288u) {
     size_t safe = (maxContig > 20480u) ? (maxContig - 12288u) : (maxContig * 3u / 4u);
     arenaBytes = static_cast<uint32_t>(safe & ~7u);

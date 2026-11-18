@@ -10,14 +10,14 @@
 
 namespace tt {
 
-static constexpr uint32_t kDefaultArenaBytes = 131072u;  // 128 KB GC object arena
+static constexpr uint32_t kDefaultArenaBytes = 131072u;  // 128 KB default on desktop host
 static constexpr uint16_t kMaxClasses        = 192;
-static constexpr uint16_t kMaxSymbols        = 2048;
+static constexpr uint16_t kMaxSymbols        = 1024;
 static constexpr uint16_t kMaxTempRoots      = 128;
-static constexpr uint32_t kValueStackSize    = 2048;
+static constexpr uint32_t kValueStackSize    = 1024;
 static constexpr uint16_t kMaxCallDepth      = 96;
 static constexpr uint16_t kMaxTryDepth       = 24;
-static constexpr size_t   kLogRingSize       = 64;
+static constexpr size_t   kLogRingSize       = 24;
 
 // Built-in Well-Known Class IDs (1-based; 0 = invalid)
 enum BuiltinClsId : uint16_t {
@@ -233,6 +233,7 @@ struct VM {
 
   // Classes & Methods
   Oop      defineClass(const char* name, uint16_t superClsId, bool isUsr, uint16_t fixedClsId = 0, uint16_t fixedMetaId = 0);
+  Oop      ensureSavedInstsDict(ObjCls* cls);
   void     defineVars(ObjCls* cls, const char* spaceSepVars, bool autoAccessors);
   ObjMeth* addPrim(uint16_t clsId, const char* name, const char* abbrev, PrimFn fn);
   ObjMeth* addUsrMeth(ObjCls* cls, const char* name, const char* abbrev,

@@ -1,6 +1,10 @@
 #include "tt_serial.h"
 #include "vm/tt_world.h"
 
+#ifdef ARDUINO
+#include <Arduino.h>
+#endif
+
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
@@ -151,7 +155,17 @@ void SerialRepl::processLine(const std::string& line) {
     }
     if (verb == ":gc" || verb == ":mem") {
       vm.runGC();
-      char st[160];
+      char st[220];
+#ifdef ARDUINO
+      std::snprintf(st, sizeof(st),
+                    "Arena: %u/%u B | Ext: %u B | ESP free: %u B (max blk: %u B) | GCs: %u\r\ntt> ",
+                    static_cast<unsigned>(vm.heap.usedBytes),
+                    static_cast<unsigned>(vm.heap.totalBytes),
+                    static_cast<unsigned>(vm.heap.externalBytes),
+                    static_cast<unsigned>(ESP.getFreeHeap()),
+                    static_cast<unsigned>(ESP.getMaxAllocHeap()),
+                    static_cast<unsigned>(vm.heap.gcCount));
+#else
       std::snprintf(st, sizeof(st),
                     "Arena: %u / %u B used (%u free) | Ext: %u B | GCs: %u | Cls: %u | Syms: %u\r\ntt> ",
                     static_cast<unsigned>(vm.heap.usedBytes),
@@ -161,6 +175,7 @@ void SerialRepl::processLine(const std::string& line) {
                     static_cast<unsigned>(vm.heap.gcCount),
                     static_cast<unsigned>(vm.classCount),
                     static_cast<unsigned>(vm.symCount));
+#endif
       hal.serialPrint(st);
       return;
     }

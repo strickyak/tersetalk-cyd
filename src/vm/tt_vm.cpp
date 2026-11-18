@@ -148,10 +148,10 @@ static ObjCls* allocRawCls(VM& vm, uint16_t metaClsId, uint16_t thisClsId,
   c->trace          = false;
   c->nameSym        = vm.internSym(name);
   c->nameStr        = vm.newStr(name);
-  c->methDict       = vm.newDict(8);
+  c->methDict       = vm.newDict(4);
   c->myVarsList     = vm.newList(2);
   c->subsList       = vm.newList(2);
-  c->savedInstsDict = vm.newDict(4);
+  c->savedInstsDict = kOopNil;
   for (int i = 0; i < kUsrLruSize; i++) c->lruCache[i] = kOopNil;
 
   // Inherit superclass instVars
@@ -195,6 +195,18 @@ Oop VM::defineClass(const char* name, uint16_t superClsId, bool isUsr,
     appendWorldEntry(hdr.c_str(), nullptr);
   }
   return oopFromObj(&newCls->hdr);
+}
+
+Oop VM::ensureSavedInstsDict(ObjCls* cls) {
+  if (!cls) return kOopNil;
+  if (!isObj(cls->savedInstsDict)) {
+    Oop clsOop = oopFromObj(&cls->hdr);
+    TempRootGuard rg(*this, clsOop);
+    Oop d = newDict(4);
+    reinterpret_cast<ObjCls*>(objFromOop(clsOop))->savedInstsDict = d;
+    return d;
+  }
+  return cls->savedInstsDict;
 }
 
 static void recalcVarsBelow(VM& vm, ObjCls* c) {
@@ -408,7 +420,8 @@ static void setInstSlot(VM& vm, Oop self, uint16_t idx, Oop val) {
   }
   if (h->format == OBJ_CLS) {
     auto* c = reinterpret_cast<ObjCls*>(h);
-    vm.dictPut(c->savedInstsDict, makeInt30(-1 - static_cast<int32_t>(idx)), val);
+    Oop sd = vm.ensureSavedInstsDict(c);
+    vm.dictPut(sd, makeInt30(-1 - static_cast<int32_t>(idx)), val);
   }
 }
 

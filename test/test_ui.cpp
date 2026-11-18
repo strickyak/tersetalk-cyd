@@ -183,8 +183,33 @@ static void testGraffitiKeyboardBrowserAndSerial(VM& vm, HalMock& hal, WindowMan
   repl.processLine("Greeter new hi");
   CHECK(hal.serialOutLog.find("=> 'Hello CYD!'") != std::string::npos);
 
+  // 5. Regression test: closing windows must immediately free all Bmp external memory (no lruCache leak!)
+  while (wm.zCount > 0) {
+    wm.closeWindowSlot(wm.zOrder[wm.zCount - 1]);
+  }
+  vm.runGC();
+  // Warm up PaintApp bytecode compilation once, close it, and record steady-state externalBytes
+  Window* p0 = wm.launchTerseAppByClassName("PaintApp");
+  CHECK(p0 != nullptr);
+  wm.render();
+  wm.closeWindowSlot(wm.zOrder[wm.zCount - 1]);
+  uint32_t baselineExt = vm.heap.externalBytes;
+
+  // Open & close PaintApp (17,920 B Bmp), MandelApp, and LifeApp 5 times in a row — zero leak!
+  for (int iter = 0; iter < 5; iter++) {
+    Window* pa = wm.launchTerseAppByClassName("PaintApp");
+    Window* ma = wm.launchTerseAppByClassName("MandelApp");
+    Window* la = wm.launchTerseAppByClassName("LifeApp");
+    CHECK(pa != nullptr && ma != nullptr && la != nullptr);
+    wm.render();
+    while (wm.zCount > 0) {
+      wm.closeWindowSlot(wm.zOrder[wm.zCount - 1]);
+    }
+  }
+  CHECK(vm.heap.externalBytes == baselineExt);
+
   gUiPassed++;
-  std::printf("[PASS] Palm Graffiti, Stylus Keyboard, Class Browser & USB Serial REPL\n");
+  std::printf("[PASS] Palm Graffiti, Stylus Keyboard, Class Browser, Serial REPL & Zero Bmp Leak\n");
 }
 
 int main() {

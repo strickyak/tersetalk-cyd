@@ -349,7 +349,7 @@ void VM::markOop(Oop v) {
         pushOop(c->myVarsList);
         pushOop(c->subsList);
         pushOop(c->savedInstsDict);
-        for (int i = 0; i < kUsrLruSize; i++) pushOop(c->lruCache[i]);
+        // Note: `c->lruCache` is a WEAK cache (cleared below in runGC if unmarked!)
         break;
       }
       case OBJ_METH: {
@@ -425,6 +425,21 @@ void VM::runGC() {
   }
   if (host.markUiRoots) {
     host.markUiRoots(host.user, *this);
+  }
+
+  // 1b. Clear weak `lruCache` entries on classes whose target objects were not marked
+  for (uint16_t i = 1; i <= classCount; i++) {
+    ObjCls* c = clsById(i);
+    if (!c) continue;
+    for (int k = 0; k < kUsrLruSize; k++) {
+      Oop entry = c->lruCache[k];
+      if (isObj(entry)) {
+        ObjHeader* eh = objFromOop(entry);
+        if (!eh || !(eh->gcFlags & GC_MARKED)) {
+          c->lruCache[k] = kOopNil;
+        }
+      }
+    }
   }
 
   // 2. Single-pass linear Sweep + Backward Coalesce
@@ -604,7 +619,7 @@ void VM::listAppend(Oop listOop, Oop val) {
 }
 
 Oop VM::newDict(uint32_t initialCap) {
-  uint32_t cap = 8u;
+  uint32_t cap = 4u;
   while (cap < initialCap) cap <<= 1u;
   auto* o = reinterpret_cast<ObjDict*>(allocObj(CLS_DICT, OBJ_DICT, 0, sizeof(ObjDict)));
   TempRootGuard rg(*this, oopFromObj(&o->hdr));
@@ -626,15 +641,7 @@ Oop VM::newUsr(uint16_t clsId) {
   for (uint16_t i = 0; i < nVars; i++) {
     o->slots[i] = kOopNil;
   }
-  Oop res = oopFromObj(&o->hdr);
-  if (c && c->isUsrCls) {
-    // Store in class's LRU ring
-    for (int i = 0; i < kUsrLruSize - 1; i++) {
-      c->lruCache[i] = c->lruCache[i + 1];
-    }
-    c->lruCache[kUsrLruSize - 1] = res;
-  }
-  return res;
+  return oopFromObj(&o->hdr);
 }
 
 uint16_t VM::oopClsId(Oop v) const {
@@ -978,7 +985,7 @@ std::string VM::toStdString(Oop v) {
   if (isChar(v)) {
     uint32_t cp = asChar(v);
     if (cp < 0x80u) return std::string(1, static_cast<char>(cp));
-    std::snprintf(buf, sizeof(buf), "Char(%u)", cp);
+    std::snprintf(buf, sizeof(buf), "Char(%u)", static_cast<unsigned>(cp));
     return buf;
   }
   if (isSym(v)) {

@@ -183,6 +183,8 @@ void WindowManager::closeWindowSlot(int slot) {
   }
   zCount = out;
   if (zCount == 0) maximized = false;
+  // Reclaim any large offscreen Bmp buffers immediately upon window close
+  vm.runGC();
   needsRedraw = true;
 }
 

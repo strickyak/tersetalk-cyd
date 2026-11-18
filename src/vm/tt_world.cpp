@@ -138,7 +138,10 @@ bool loadWorldBuffer(VM& vm, const char* worldTag, const char* buf, size_t len,
           iname = iname + "_" + worldTag;
         }
         uint32_t isym = vm.internSym(iname.c_str(), iname.size());
-        vm.dictPut(cls->savedInstsDict, makeSym(isym), vm.newStr(more.c_str(), more.size()));
+        Oop sVal = vm.newStr(more.c_str(), more.size());
+        TempRootGuard rg(vm, sVal);
+        Oop sd = vm.ensureSavedInstsDict(cls);
+        vm.dictPut(sd, makeSym(isym), sVal);
       } else if (cmd == "equals") {
         std::string expectedExpr;
         for (size_t i = 1; i < words.size(); i++) {
