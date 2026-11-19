@@ -7,6 +7,10 @@ namespace tt {
 
 namespace {
 
+// Keep VirtualKeyboard fixed at the compact 5x7 font (6x8 cell)
+static constexpr int16_t kFontW = 6;
+static constexpr int16_t kFontH = 8;
+
 struct QuickToken {
   const char* label;
   const char* insert;
@@ -102,6 +106,13 @@ void VirtualKeyboard::backspace() {
 
 void VirtualKeyboard::render(DisplayHal& hal) {
   if (!active) return;
+  struct ScopedFont7 {
+    DisplayHal& h;
+    uint8_t saved;
+    explicit ScopedFont7(DisplayHal& d) : h(d), saved(d.activeFontSize) { h.activeFontSize = 7; }
+    ~ScopedFont7() { h.activeFontSize = saved; }
+  } fontGuard(hal);
+
   hal.resetClipRect();
   hal.fillRect(0, 0, kScreenW, kScreenH, Color::kDarkBg);
 

@@ -2,6 +2,7 @@
 #include "tt_ide.h"
 #include "tt_keyboard.h"
 #include "tt_pen.h"
+#include "tt_scrollbar.h"
 #include "vm/tt_world.h"
 
 #include <algorithm>
@@ -13,7 +14,6 @@ namespace tt {
 namespace {
 
 static int16_t gNextWinId = 1;
-static constexpr int16_t kMenuRowH = 12;
 
 }  // namespace
 
@@ -86,7 +86,7 @@ Window* WindowManager::createTerseWindow(Oop appObj, const char* title,
   win.id             = wid;
   win.alive          = true;
   win.x              = std::max<int16_t>(0, std::min<int16_t>(x, kScreenW - 80));
-  win.y              = std::max<int16_t>(kTopBarH, std::min<int16_t>(y, kScreenH - 60));
+  win.y              = std::max<int16_t>(topBarH(), std::min<int16_t>(y, kScreenH - 60));
   win.w              = std::max<int16_t>(96, std::min<int16_t>(w, kScreenW - win.x));
   win.h              = std::max<int16_t>(64, std::min<int16_t>(h, kScreenH - win.y));
   win.title          = title ? title : "App";
@@ -114,7 +114,7 @@ Window* WindowManager::createNativeWindow(NativeWinController* ctrl, const char*
   win.id             = gNextWinId++;
   win.alive          = true;
   win.x              = std::max<int16_t>(0, std::min<int16_t>(x, kScreenW - 80));
-  win.y              = std::max<int16_t>(kTopBarH, std::min<int16_t>(y, kScreenH - 60));
+  win.y              = std::max<int16_t>(topBarH(), std::min<int16_t>(y, kScreenH - 60));
   win.w              = std::max<int16_t>(96, std::min<int16_t>(w, kScreenW - win.x));
   win.h              = std::max<int16_t>(64, std::min<int16_t>(h, kScreenH - win.y));
   win.title          = title ? title : ctrl->appName();
@@ -273,6 +273,36 @@ void WindowManager::openEditAppCodeBrowser() {
   if (maximized) maximized = false;
   createNativeWindow(createClassBrowserController(focusCls.c_str()),
                      ("Browse: " + focusCls).c_str(), 14, 24, 292, 204);
+}
+
+void WindowManager::openConfigPanel() {
+  if (maximized) maximized = false;
+  // Focus existing Config window if already open
+  for (int i = 0; i < zCount; i++) {
+    int slot = zOrder[i];
+    if (windows[slot].alive && windows[slot].native &&
+        std::strcmp(windows[slot].native->appName(), "Config") == 0) {
+      focusWindowSlot(slot);
+      needsRedraw = true;
+      return;
+    }
+  }
+  createNativeWindow(createConfigController(), "Config", 24, 28, 272, 180);
+}
+
+void WindowManager::onFontSizeChanged() {
+  int16_t tb = topBarH();
+  for (int i = 0; i < kMaxWindows; i++) {
+    if (!windows[i].alive) continue;
+    if (windows[i].y < tb) windows[i].y = tb;
+    if (windows[i].y + windows[i].h > kScreenH) {
+      windows[i].h = std::max<int16_t>(64, static_cast<int16_t>(kScreenH - windows[i].y));
+    }
+    windows[i].dirty = true;
+  }
+  activeMenu    = 0;
+  dropdownDirty = false;
+  needsRedraw   = true;
 }
 
 void WindowManager::showBanner(const std::string& msg, uint32_t durationMs) {
@@ -480,9 +510,9 @@ void WindowManager::getClientRect(const Window& win, bool isTop,
     return;
   }
   cx = static_cast<int16_t>(win.x + 1);
-  cy = static_cast<int16_t>(win.y + kWinTitleH);
+  cy = static_cast<int16_t>(win.y + winTitleH());
   cw = static_cast<int16_t>(win.w - 2);
-  ch = static_cast<int16_t>(win.h - kWinTitleH - 1);
+  ch = static_cast<int16_t>(win.h - winTitleH() - 1);
   if (cw < 1) cw = 1;
   if (ch < 1) ch = 1;
 }
@@ -520,6 +550,7 @@ void WindowManager::buildGlobalMenu(std::vector<MenuItem>& out) {
   out.push_back({"App: Conway Life", "", [this]() { launchTerseAppByClassName("LifeApp"); }});
   out.push_back({"App: Paint Pad",   "", [this]() { launchTerseAppByClassName("PaintApp"); }});
   out.push_back({"Class Browser",    "", [this]() { openEditAppCodeBrowser(); }});
+  out.push_back({"Config",           "", [this]() { openConfigPanel(); }});
   out.push_back({"Calibrate Touch",  "", [this]() {
     hal.runTouchCalibration();
     needsRedraw = true;
@@ -592,16 +623,26 @@ void WindowManager::buildAppMenu(std::vector<MenuItem>& out) {
 }
 
 void WindowManager::layoutDropdown(bool rightAlign) {
-  size_t maxChars = 14;
+  const int16_t rowH = menuRowH();
+  const int16_t my   = (maximized && zCount > 0) ? kWedgeBoxMax : topBarH();
+  const int16_t maxH = static_cast<int16_t>(kScreenH - my - 2);
+  const int maxVis   = std::max(1, static_cast<int>((maxH - 4) / rowH));
+  const int total    = static_cast<int>(menuItems.size());
+  const int vis      = std::min(total, maxVis);
+
+  size_t maxChars = 12;
   for (const auto& it : menuItems) {
     if (it.label.size() > maxChars) maxChars = it.label.size();
   }
-  menuW = static_cast<int16_t>(std::min<size_t>(kScreenW - 8, maxChars * kFontW + 14));
-  menuH = static_cast<int16_t>(menuItems.size() * kMenuRowH + 4);
-  if (menuH > kScreenH - 18) menuH = kScreenH - 18;
+  int16_t sbExtra = ScrollBar::isNeeded(total, vis) ? static_cast<int16_t>(ScrollBar::width(hal) + 2) : 0;
+  menuW = static_cast<int16_t>(std::min<size_t>(
+    kScreenW - 8, maxChars * static_cast<size_t>(hal.fontW()) + 14u + static_cast<size_t>(sbExtra)));
+  menuH = static_cast<int16_t>(vis * rowH + 4);
   menuX = rightAlign ? static_cast<int16_t>(kScreenW - menuW - 2) : 2;
-  menuY = 16;
-  menuHoverIdx = -1;
+  menuY = my;
+  menuHoverIdx  = -1;
+  menuScroll    = 0;
+  menuThumbDrag = false;
 }
 
 void WindowManager::openGlobalMenu() {
@@ -629,18 +670,25 @@ void WindowManager::openAppMenu() {
 // ---------------------------------------------------------------------------
 void WindowManager::renderTopBar() {
   hal.resetClipRect();
-  hal.fillRect(0, 0, kScreenW, kTopBarH, Color::kBarBg);
-  hal.drawHLine(0, kTopBarH - 1, kScreenW, Color::kBorder);
+  const int16_t tbh = topBarH();
+  const int16_t ty  = static_cast<int16_t>((tbh - hal.fontH()) / 2);
+  hal.fillRect(0, 0, kScreenW, tbh, Color::kBarBg);
+  hal.drawHLine(0, tbh - 1, kScreenW, Color::kBorder);
 
   // NW Global Menu Wedge (downward-pointing triangle in top-left corner)
-  hal.drawMenuWedge(0, 0, kWedgeBoxOverlap,
+  hal.drawMenuWedge(0, 0, tbh,
                     activeMenu == 1 ? Color::kMenuSel : Color::kBlack,
                     Color::kAccent);
 
   // NE App Menu Wedge (downward-pointing triangle in top-right corner)
-  hal.drawMenuWedge(kScreenW - kWedgeBoxOverlap, 0, kWedgeBoxOverlap,
+  hal.drawMenuWedge(kScreenW - tbh, 0, tbh,
                     activeMenu == 2 ? Color::kMenuSel : Color::kBlack,
                     Color::kCyan);
+
+  // App menu hint right next to NE wedge
+  const int16_t appLblW = static_cast<int16_t>(3 * hal.fontW() + 4);
+  const int16_t appLblX = static_cast<int16_t>(kScreenW - tbh - appLblW);
+  hal.drawText(appLblX, ty, "App", Color::kCyan);
 
   // Center status: TerseTalk + Current App name + Free RAM
   std::string appLabel = "Desktop";
@@ -655,10 +703,7 @@ void WindowManager::renderTopBar() {
   char barText[80];
   std::snprintf(barText, sizeof(barText), "TT | %s (%d) %uK",
                 appLabel.c_str(), zCount, static_cast<unsigned>(freeKb));
-  hal.drawTextClipped(20, 4, kScreenW - 40, barText, Color::kWhite);
-
-  // App menu hint right next to NE wedge
-  hal.drawText(kScreenW - kWedgeBoxOverlap - 24, 4, "App", Color::kCyan);
+  hal.drawTextClipped(tbh + 4, ty, appLblX - (tbh + 8), barText, Color::kWhite);
 }
 
 void WindowManager::renderMaximizedWedges() {
@@ -698,9 +743,10 @@ void WindowManager::renderWindowClient(Window& win, bool isTop) {
       }
     } catch (const TerseError& e) {
       hal.setClipRect(cx, cy, cw, ch);
-      hal.fillRect(cx, cy, cw, 22, 0x6000);
-      hal.drawTextClipped(cx + 4, cy + 3, cw - 8, "Runtime Error:", Color::kAccent);
-      hal.drawTextClipped(cx + 4, cy + 12, cw - 8, e.message.c_str(), Color::kWhite);
+      int16_t errH = static_cast<int16_t>(2 * hal.fontH() + 6);
+      hal.fillRect(cx, cy, cw, errH, 0x6000);
+      hal.drawTextClipped(cx + 4, cy + 2, cw - 8, "Runtime Error:", Color::kAccent);
+      hal.drawTextClipped(cx + 4, cy + 3 + hal.fontH(), cw - 8, e.message.c_str(), Color::kWhite);
     }
   } else if (win.native) {
     win.native->onPaint(vm, hal, win, cx, cy, cw, ch);
@@ -725,23 +771,27 @@ void WindowManager::renderWindow(Window& win, bool isTop) {
     hal.fillRect(win.x + win.w, win.y + 2, 2, win.h, Color::kBlack);
 
     // Outer border & title bar
+    const int16_t th   = winTitleH();
+    const int16_t btnW = static_cast<int16_t>(hal.fontW() + 5);
+    const int16_t xx   = static_cast<int16_t>(win.x + win.w - btnW - 2);
+    const int16_t mx   = static_cast<int16_t>(xx - btnW - 1);
+    const int16_t ty   = static_cast<int16_t>(win.y + (th - hal.fontH()) / 2);
+
     uint16_t titleBg = isTop ? Color::kTitleFocus : Color::kTitleBlur;
     hal.drawRect(win.x, win.y, win.w, win.h, isTop ? Color::kAccent : Color::kBorder);
-    hal.fillRect(win.x + 1, win.y + 1, win.w - 2, kWinTitleH - 1, titleBg);
-    hal.drawHLine(win.x + 1, win.y + kWinTitleH - 1, win.w - 2, Color::kBorder);
+    hal.fillRect(win.x + 1, win.y + 1, win.w - 2, th - 1, titleBg);
+    hal.drawHLine(win.x + 1, win.y + th - 1, win.w - 2, Color::kBorder);
 
     // Title text
-    hal.drawTextClipped(win.x + 4, win.y + 2, win.w - 32,
+    hal.drawTextClipped(win.x + 4, ty, mx - (win.x + 6),
                         win.title.c_str(), isTop ? Color::kAccent : Color::kWhite);
 
     // [M] Maximize button & [X] 2-tap Close button
-    int16_t mx = static_cast<int16_t>(win.x + win.w - 25);
-    int16_t xx = static_cast<int16_t>(win.x + win.w - 13);
-    hal.fillRect(mx, win.y + 2, 11, kWinTitleH - 3, Color::kKeyBg);
-    hal.drawChar(mx + 3, win.y + 2, '^', Color::kCyan);
+    hal.fillRect(mx, win.y + 2, btnW, th - 3, Color::kKeyBg);
+    hal.drawChar(mx + 3, ty, '^', Color::kCyan);
 
-    hal.fillRect(xx, win.y + 2, 11, kWinTitleH - 3, win.closeArmed ? Color::kRed : Color::kKeyBg);
-    hal.drawChar(xx + 3, win.y + 2, win.closeArmed ? '?' : 'x',
+    hal.fillRect(xx, win.y + 2, btnW, th - 3, win.closeArmed ? Color::kRed : Color::kKeyBg);
+    hal.drawChar(xx + 3, ty, win.closeArmed ? '?' : 'x',
                  win.closeArmed ? Color::kWhite : Color::kOrange);
   }
 
@@ -756,34 +806,54 @@ void WindowManager::renderDropdown() {
   hal.fillRect(menuX, menuY, menuW, menuH, Color::kMenuBg);
   hal.drawRect(menuX, menuY, menuW, menuH, Color::kAccent);
 
-  int maxRows = (menuH - 4) / kMenuRowH;
-  for (int i = 0; i < maxRows && i < static_cast<int>(menuItems.size()); i++) {
-    int16_t ry = static_cast<int16_t>(menuY + 2 + i * kMenuRowH);
-    bool hov = (i == menuHoverIdx);
-    if (hov) hal.fillRect(menuX + 2, ry, menuW - 4, kMenuRowH - 1, Color::kMenuSel);
-    hal.drawTextClipped(menuX + 6, ry + 2, menuW - 10,
-                        menuItems[i].label.c_str(), hov ? Color::kAccent : Color::kWhite);
+  const int16_t rowH  = menuRowH();
+  const int total     = static_cast<int>(menuItems.size());
+  const int visRows   = std::max(1, static_cast<int>((menuH - 4) / rowH));
+  menuScroll          = ScrollBar::clampScroll(menuScroll, total, visRows);
+  const bool hasSb    = ScrollBar::isNeeded(total, visRows);
+  const int16_t sbW   = hasSb ? ScrollBar::width(hal) : 0;
+  const int16_t itemW = static_cast<int16_t>(menuW - 4 - (hasSb ? (sbW + 1) : 0));
+
+  for (int i = 0; i < visRows && (menuScroll + i) < total; i++) {
+    int itemIdx = menuScroll + i;
+    int16_t ry  = static_cast<int16_t>(menuY + 2 + i * rowH);
+    bool hov    = (itemIdx == menuHoverIdx);
+    if (hov) hal.fillRect(menuX + 2, ry, itemW, rowH - 1, Color::kMenuSel);
+    hal.drawTextClipped(menuX + 6, ry + (rowH - hal.fontH()) / 2, itemW - 6,
+                        menuItems[itemIdx].label.c_str(), hov ? Color::kAccent : Color::kWhite);
+  }
+
+  if (hasSb) {
+    ScrollBar::draw(hal, menuX + 1, menuY + 1, menuW - 2, menuH - 2, total, visRows, menuScroll);
   }
 }
 
 void WindowManager::renderModal() {
   if (!modalActive) return;
   hal.resetClipRect();
-  const int16_t bx = 22, by = 42, bw = 276;
-  const int16_t bh = static_cast<int16_t>(42 + modalButtons.size() * 28);
+  const int16_t fh     = hal.fontH();
+  const int16_t hdrH   = static_cast<int16_t>(fh + 6);
+  const int16_t bodyY  = static_cast<int16_t>(hdrH + fh + 12);
+  const int16_t btnH   = static_cast<int16_t>(fh + 12);
+  const int16_t stride = static_cast<int16_t>(btnH + 5);
+  const int16_t bx = 18, bw = 284;
+  const int16_t bh = static_cast<int16_t>(bodyY + modalButtons.size() * stride + 4);
+  const int16_t by = static_cast<int16_t>(std::max<int16_t>(16, (kScreenH - bh) / 2));
+
   hal.fillRect(bx + 3, by + 3, bw, bh, Color::kBlack);
   hal.fillRect(bx, by, bw, bh, Color::kMenuBg);
   hal.drawRect(bx, by, bw, bh, Color::kAccent);
-  hal.fillRect(bx + 1, by + 1, bw - 2, 14, Color::kTitleFocus);
-  hal.drawHLine(bx + 1, by + 15, bw - 2, Color::kBorder);
-  hal.drawTextClipped(bx + 6, by + 4, bw - 12, modalTitle.c_str(), Color::kAccent);
-  hal.drawTextClipped(bx + 6, by + 21, bw - 12, modalSubtitle.c_str(), Color::kWhite);
+  hal.fillRect(bx + 1, by + 1, bw - 2, hdrH, Color::kTitleFocus);
+  hal.drawHLine(bx + 1, by + hdrH + 1, bw - 2, Color::kBorder);
+  hal.drawTextClipped(bx + 6, by + 3, bw - 12, modalTitle.c_str(), Color::kAccent);
+  hal.drawTextClipped(bx + 6, by + hdrH + 5, bw - 12, modalSubtitle.c_str(), Color::kWhite);
 
   for (size_t i = 0; i < modalButtons.size(); i++) {
-    int16_t ry = static_cast<int16_t>(by + 36 + i * 28);
-    hal.fillRoundRect(bx + 10, ry, bw - 20, 22, 3, modalButtons[i].bgColor);
-    hal.drawRect(bx + 10, ry, bw - 20, 22, Color::kBorder);
-    hal.drawTextClipped(bx + 18, ry + 7, bw - 36, modalButtons[i].label.c_str(), Color::kWhite);
+    int16_t ry = static_cast<int16_t>(by + bodyY + static_cast<int16_t>(i) * stride);
+    hal.fillRoundRect(bx + 10, ry, bw - 20, btnH, 3, modalButtons[i].bgColor);
+    hal.drawRect(bx + 10, ry, bw - 20, btnH, Color::kBorder);
+    hal.drawTextClipped(bx + 16, ry + (btnH - fh) / 2, bw - 32,
+                        modalButtons[i].label.c_str(), Color::kWhite);
   }
 }
 
@@ -804,8 +874,9 @@ void WindowManager::render() {
     renderMaximizedWedges();
   } else {
     // Desktop background with subtle grid dots
-    hal.fillRect(0, kTopBarH, kScreenW, kScreenH - kTopBarH, Color::kDarkBg);
-    for (int16_t gy = kTopBarH + 12; gy < kScreenH; gy += 16) {
+    const int16_t tbh = topBarH();
+    hal.fillRect(0, tbh, kScreenW, kScreenH - tbh, Color::kDarkBg);
+    for (int16_t gy = tbh + 12; gy < kScreenH; gy += 16) {
       for (int16_t gx = 12; gx < kScreenW; gx += 16) {
         hal.drawPixel(gx, gy, 0x2945);
       }
@@ -827,9 +898,11 @@ void WindowManager::render() {
   if (!statusBanner.empty()) {
     if (hal.millis() < bannerExpireMs) {
       hal.resetClipRect();
-      hal.fillRect(4, kScreenH - 15, kScreenW - 8, 13, Color::kMenuSel);
-      hal.drawRect(4, kScreenH - 15, kScreenW - 8, 13, Color::kAccent);
-      hal.drawTextClipped(8, kScreenH - 12, kScreenW - 16, statusBanner.c_str(), Color::kWhite);
+      int16_t banH = static_cast<int16_t>(hal.fontH() + 5);
+      int16_t banY = static_cast<int16_t>(kScreenH - banH - 2);
+      hal.fillRect(4, banY, kScreenW - 8, banH, Color::kMenuSel);
+      hal.drawRect(4, banY, kScreenW - 8, banH, Color::kAccent);
+      hal.drawTextClipped(8, banY + 2, kScreenW - 16, statusBanner.c_str(), Color::kWhite);
     } else {
       statusBanner.clear();
     }
@@ -880,11 +953,19 @@ void WindowManager::handleTouchDown(int16_t tx, int16_t ty) {
   }
 
   if (modalActive) {
-    const int16_t bx = 22, by = 42, bw = 276;
+    const int16_t fh     = hal.fontH();
+    const int16_t hdrH   = static_cast<int16_t>(fh + 6);
+    const int16_t bodyY  = static_cast<int16_t>(hdrH + fh + 12);
+    const int16_t btnH   = static_cast<int16_t>(fh + 12);
+    const int16_t stride = static_cast<int16_t>(btnH + 5);
+    const int16_t bx = 18, bw = 284;
+    const int16_t bh = static_cast<int16_t>(bodyY + modalButtons.size() * stride + 4);
+    const int16_t by = static_cast<int16_t>(std::max<int16_t>(16, (kScreenH - bh) / 2));
+
     if (tx >= bx + 10 && tx < bx + bw - 10) {
       for (size_t i = 0; i < modalButtons.size(); i++) {
-        int16_t ry = static_cast<int16_t>(by + 36 + i * 28);
-        if (ty >= ry && ty < ry + 22) {
+        int16_t ry = static_cast<int16_t>(by + bodyY + static_cast<int16_t>(i) * stride);
+        if (ty >= ry && ty < ry + btnH) {
           auto fn = modalButtons[i].action;
           modalActive = false;
           needsRedraw = true;
@@ -897,23 +978,37 @@ void WindowManager::handleTouchDown(int16_t tx, int16_t ty) {
   }
 
   // 1. Check NW / NE Corner Wedges first
-  int16_t wedgeSz = (maximized && zCount > 0) ? kWedgeBoxMax : kWedgeBoxOverlap;
+  int16_t wedgeSz = (maximized && zCount > 0) ? kWedgeBoxMax : topBarH();
+  int16_t appHitW = (maximized && zCount > 0) ? (wedgeSz + 4)
+                  : static_cast<int16_t>(wedgeSz + 3 * hal.fontW() + 6);
   if (ty < wedgeSz + 2) {
     if (tx < wedgeSz + 4) {
       openGlobalMenu();
       return;
     }
-    if (tx >= kScreenW - wedgeSz - 28) {
+    if (tx >= kScreenW - appHitW) {
       openAppMenu();
       return;
     }
   }
 
-  // 2. If a Dropdown Menu is open, select item or dismiss
+  // 2. If a Dropdown Menu is open, scroll, select item, or dismiss
   if (activeMenu != 0) {
+    const int16_t rowH = menuRowH();
+    const int total    = static_cast<int>(menuItems.size());
+    const int visRows  = std::max(1, static_cast<int>((menuH - 4) / rowH));
+    if (ScrollBar::handleTouch(hal, "down", tx, ty,
+                               menuX + 1, menuY + 1, menuW - 2, menuH - 2,
+                               total, visRows, menuScroll, menuThumbDrag)) {
+      menuHoverIdx  = -1;
+      dragMode      = DragMode::DROPDOWN_SCROLL;
+      dropdownDirty = true;
+      return;
+    }
     if (tx >= menuX && tx < menuX + menuW && ty >= menuY && ty < menuY + menuH) {
-      int idx = (ty - (menuY + 2)) / kMenuRowH;
-      if (idx >= 0 && idx < static_cast<int>(menuItems.size())) {
+      int visIdx = (ty - (menuY + 2)) / rowH;
+      int idx    = menuScroll + visIdx;
+      if (visIdx >= 0 && visIdx < visRows && idx >= 0 && idx < total) {
         menuHoverIdx  = idx;
         dragMode      = DragMode::DROPDOWN;
         dropdownDirty = true;
@@ -949,9 +1044,11 @@ void WindowManager::handleTouchDown(int16_t tx, int16_t ty) {
     focusWindowSlot(slot);
 
     // Title bar hit?
-    if (ty < win.y + kWinTitleH) {
-      int16_t mx = static_cast<int16_t>(win.x + win.w - 26);
-      int16_t xx = static_cast<int16_t>(win.x + win.w - 13);
+    const int16_t th   = winTitleH();
+    const int16_t btnW = static_cast<int16_t>(hal.fontW() + 5);
+    if (ty < win.y + th) {
+      int16_t xx = static_cast<int16_t>(win.x + win.w - btnW - 2);
+      int16_t mx = static_cast<int16_t>(xx - btnW - 1);
       if (tx >= xx) {
         if (wasCloseArmed) {
           closeWindowSlot(slot);
@@ -979,8 +1076,8 @@ void WindowManager::handleTouchDown(int16_t tx, int16_t ty) {
       return;
     }
 
-    // SE Resize Corner hit (12x12 bottom-right zone)?
-    if (tx >= win.x + win.w - 12 && ty >= win.y + win.h - 12) {
+    // SE Resize Corner hit (8x8 bottom-right grow-box)?
+    if (tx >= win.x + win.w - 8 && ty >= win.y + win.h - 8) {
       dragMode     = DragMode::RESIZE_WIN;
       dragWinSlot  = slot;
       dragStartX   = tx;
@@ -1005,11 +1102,28 @@ void WindowManager::handleTouchMove(int16_t tx, int16_t ty) {
     keyboard->onTouchMove(hal, tx, ty, keyboardDirty);
     return;
   }
+  if (dragMode == DragMode::DROPDOWN_SCROLL && activeMenu != 0) {
+    const int16_t rowH = menuRowH();
+    const int total    = static_cast<int>(menuItems.size());
+    const int visRows  = std::max(1, static_cast<int>((menuH - 4) / rowH));
+    if (ScrollBar::handleTouch(hal, "move", tx, ty,
+                               menuX + 1, menuY + 1, menuW - 2, menuH - 2,
+                               total, visRows, menuScroll, menuThumbDrag)) {
+      dropdownDirty = true;
+    }
+    return;
+  }
   if (dragMode == DragMode::DROPDOWN && activeMenu != 0) {
+    const int16_t rowH   = menuRowH();
+    const int total      = static_cast<int>(menuItems.size());
+    const int visRows    = std::max(1, static_cast<int>((menuH - 4) / rowH));
+    const int16_t sbTake = ScrollBar::isNeeded(total, visRows) ? ScrollBar::width(hal) : 0;
     int idx = -1;
-    if (tx >= menuX && tx < menuX + menuW && ty >= menuY && ty < menuY + menuH) {
-      idx = (ty - (menuY + 2)) / kMenuRowH;
-      if (idx < 0 || idx >= static_cast<int>(menuItems.size())) idx = -1;
+    if (tx >= menuX && tx < menuX + menuW - sbTake && ty >= menuY && ty < menuY + menuH) {
+      int visIdx = (ty - (menuY + 2)) / rowH;
+      if (visIdx >= 0 && visIdx < visRows && (menuScroll + visIdx) < total) {
+        idx = menuScroll + visIdx;
+      }
     }
     if (idx != menuHoverIdx) {
       menuHoverIdx  = idx;
@@ -1024,7 +1138,7 @@ void WindowManager::handleTouchMove(int16_t tx, int16_t ty) {
     int16_t nx = static_cast<int16_t>(dragOrigWinX + (tx - dragStartX));
     int16_t ny = static_cast<int16_t>(dragOrigWinY + (ty - dragStartY));
     nx = std::max<int16_t>(0, std::min<int16_t>(nx, kScreenW - 48));
-    ny = std::max<int16_t>(kTopBarH, std::min<int16_t>(ny, kScreenH - 24));
+    ny = std::max<int16_t>(topBarH(), std::min<int16_t>(ny, kScreenH - 24));
     if (nx != win.x || ny != win.y) {
       win.x       = nx;
       win.y       = ny;
@@ -1056,6 +1170,12 @@ void WindowManager::handleTouchUp(int16_t tx, int16_t ty) {
       needsRedraw   = true;
     }
     dragMode = DragMode::NONE;
+    return;
+  }
+  if (dragMode == DragMode::DROPDOWN_SCROLL) {
+    menuThumbDrag = false;
+    dragMode      = DragMode::NONE;
+    dropdownDirty = true;
     return;
   }
   if (dragMode == DragMode::DROPDOWN && activeMenu != 0) {

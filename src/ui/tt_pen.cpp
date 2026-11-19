@@ -1,4 +1,5 @@
 #include "tt_pen.h"
+#include "tt_scrollbar.h"
 #include "tt_wm.h"
 
 #include <cmath>
@@ -24,6 +25,7 @@ class BmpHalAdapter : public DisplayHal {
     clipY0 = 0;
     clipX1 = static_cast<int16_t>(b->wid);
     clipY1 = static_cast<int16_t>(b->hei);
+    if (gHal) activeFontSize = gHal->activeFontSize;
   }
 
   bool init() override { return true; }
@@ -427,6 +429,94 @@ static Oop primPenTextAt(VM& vm, Oop rcvr, const Oop* args, uint8_t) {
 static Oop primPenAtText(VM& vm, Oop rcvr, const Oop* args, uint8_t) {
   Oop swapped[2] = {args[1], args[0]};
   return primPenTextAt(vm, rcvr, swapped, 2);
+}
+
+static Oop primPenFontW(VM& vm, Oop rcvr, const Oop*, uint8_t) {
+  ObjPen* p = reqPen(vm, rcvr);
+  int32_t sc = p->font ? p->font : 1;
+  int32_t fw = gHal ? gHal->fontW() : 6;
+  return makeInt30(fw * sc);
+}
+
+static Oop primPenFontH(VM& vm, Oop rcvr, const Oop*, uint8_t) {
+  ObjPen* p = reqPen(vm, rcvr);
+  int32_t sc = p->font ? p->font : 1;
+  int32_t fh = gHal ? gHal->fontH() : 8;
+  return makeInt30(fh * sc);
+}
+
+static Oop primPenFontSize(VM& vm, Oop rcvr, const Oop*, uint8_t) {
+  (void)reqPen(vm, rcvr);
+  return makeInt30(gHal ? gHal->fontSizePx() : 7);
+}
+
+static Oop primPenScrollBar(VM& vm, Oop rcvr, const Oop* args, uint8_t) {
+  ObjPen* p = reqPen(vm, rcvr);
+  int16_t total = 0, vis = 0, bx = 0, by = 0, bw = 0, bh = 0;
+  reqXYInt(vm, args[0], total, vis, "scrollBar:at:size:top:");
+  reqXYInt(vm, args[1], bx, by, "scrollBar:at:size:top:");
+  reqXYInt(vm, args[2], bw, bh, "scrollBar:at:size:top:");
+  int32_t top = isInt(args[3]) ? asInt30(args[3])
+              : (isFloat(args[3]) ? static_cast<int32_t>(asFloat(args[3])) : 0);
+  withPenTarget(p, [&](DisplayHal& d, int16_t ox, int16_t oy) {
+    ScrollBar::draw(d, static_cast<int16_t>(ox + bx), static_cast<int16_t>(oy + by),
+                    bw, bh, total, vis, top);
+  });
+  return rcvr;
+}
+
+static Oop primWinScrollHit(VM& vm, Oop, const Oop* args, uint8_t) {
+  if (!gHal) return kOopNil;
+  if (!isObj(args[0]) || objFromOop(args[0])->format != OBJ_LIST) return kOopNil;
+  auto* evPair = reinterpret_cast<ObjList*>(objFromOop(args[0]));
+  if (evPair->len < 2) return kOopNil;
+  std::string kind = vm.toStdString(evPair->items[0]);
+  int16_t tx = 0, ty = 0, bx = 0, by = 0, bw = 0, bh = 0, total = 0, vis = 0;
+  reqXYInt(vm, evPair->items[1], tx, ty, "scrollHit:");
+  reqXYInt(vm, args[1], bx, by, "scrollHit:");
+  reqXYInt(vm, args[2], bw, bh, "scrollHit:");
+  reqXYInt(vm, args[3], total, vis, "scrollHit:");
+  int top = isInt(args[4]) ? asInt30(args[4])
+          : (isFloat(args[4]) ? static_cast<int>(asFloat(args[4])) : 0);
+
+  static bool sAppThumbDrag = false;
+  if (ScrollBar::handleTouch(*gHal, kind.c_str(), tx, ty,
+                             bx, by, bw, bh, total, vis, top, sAppThumbDrag)) {
+    return makeInt30(top);
+  }
+  return kOopNil;
+}
+
+static Oop primSysFontSize(VM&, Oop, const Oop*, uint8_t) {
+  return makeInt30(gHal ? gHal->fontSizePx() : 7);
+}
+
+static Oop primSysFontSizeSet(VM&, Oop rcvr, const Oop* args, uint8_t) {
+  int32_t sz = isInt(args[0]) ? asInt30(args[0])
+             : (isFloat(args[0]) ? static_cast<int32_t>(asFloat(args[0])) : 7);
+  if (gHal) {
+    gHal->setFontSize(static_cast<uint8_t>(sz));
+    gHal->saveDisplayConfig();
+  }
+  if (gWm) gWm->onFontSizeChanged();
+  return rcvr;
+}
+
+static Oop primSysBrightness(VM&, Oop, const Oop*, uint8_t) {
+  return makeInt30(gHal ? gHal->getBacklight() : 255);
+}
+
+static Oop primSysBrightnessSet(VM&, Oop rcvr, const Oop* args, uint8_t) {
+  int32_t lvl = isInt(args[0]) ? asInt30(args[0])
+              : (isFloat(args[0]) ? static_cast<int32_t>(asFloat(args[0])) : 255);
+  if (lvl < kMinBrightness) lvl = kMinBrightness;
+  if (lvl > 255) lvl = 255;
+  if (gHal) {
+    gHal->setBacklight(static_cast<uint8_t>(lvl));
+    gHal->saveDisplayConfig();
+  }
+  if (gWm) gWm->invalidateAll();
+  return rcvr;
 }
 
 static Oop primPenBlitAt(VM& vm, Oop rcvr, const Oop* args, uint8_t) {
@@ -1306,6 +1396,10 @@ void installGraphicsPrimitives(VM& vm, DisplayHal* hal, WindowManager* wm) {
   vm.addPrim(CLS_PEN, "poly:",        "",           primPenPoly);
   vm.addPrim(CLS_PEN, "text:at:",     "",           primPenTextAt);
   vm.addPrim(CLS_PEN, "at:text:",     "",           primPenAtText);
+  vm.addPrim(CLS_PEN, "fontW",        "",           primPenFontW);
+  vm.addPrim(CLS_PEN, "fontH",        "",           primPenFontH);
+  vm.addPrim(CLS_PEN, "fontSize",     "",           primPenFontSize);
+  vm.addPrim(CLS_PEN, "scrollBar:at:size:top:", "", primPenScrollBar);
   vm.addPrim(CLS_PEN, "blit:",        "",           primPenBlitFull);
   vm.addPrim(CLS_PEN, "blit:at:",     "",           primPenBlitAt);
   vm.addPrim(CLS_PEN, "blit:at:size:","",           primPenBlitAtSize);
@@ -1356,7 +1450,13 @@ void installGraphicsPrimitives(VM& vm, DisplayHal* hal, WindowManager* wm) {
   vm.addPrim(CLS_WIN_CLS, "prompt:init:then:", "",  primWinClsPrompt);
   vm.addPrim(CLS_WIN_CLS, "promptMulti:init:then:", "", primWinClsPromptMulti);
   vm.addPrim(CLS_WIN_CLS, "banner:",  "",           primWinClsBanner);
+  vm.addPrim(CLS_WIN_CLS, "scrollHit:at:size:lines:top:", "", primWinScrollHit);
   vm.addPrim(CLS_WIN, "title:",       "",           primWinTitleSet);
+
+  vm.addPrim(CLS_SYS_CLS, "fontSize",   "",         primSysFontSize);
+  vm.addPrim(CLS_SYS_CLS, "fontSize:",  "",         primSysFontSizeSet);
+  vm.addPrim(CLS_SYS_CLS, "brightness", "",         primSysBrightness);
+  vm.addPrim(CLS_SYS_CLS, "brightness:","",         primSysBrightnessSet);
   vm.addPrim(CLS_WIN, "dirty",        "redraw",     primWinDirty);
   vm.addPrim(CLS_WIN, "every:",       "",           primWinEvery);
   vm.addPrim(CLS_WIN, "maximize",     "",           primWinMaximize);

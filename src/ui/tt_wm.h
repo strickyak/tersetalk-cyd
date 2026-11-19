@@ -56,9 +56,7 @@ struct Window {
   bool        dirty          = true;
 };
 
-static constexpr int kMaxWindows      = 12;
-static constexpr int16_t kTopBarH     = 16;
-static constexpr int16_t kWinTitleH   = 12;
+static constexpr int kMaxWindows          = 12;
 static constexpr int16_t kWedgeBoxOverlap = 16;
 static constexpr int16_t kWedgeBoxMax     = 14;
 
@@ -68,6 +66,7 @@ enum class DragMode : uint8_t {
   RESIZE_WIN,
   CLIENT_TOUCH,
   DROPDOWN,
+  DROPDOWN_SCROLL,
   KEYBOARD,
 };
 
@@ -87,9 +86,11 @@ class WindowManager {
   bool        keyboardDirty = false;  // Fast keyboard-only repaint
 
   // Active dropdown menu state (0 = none, 1 = NW Global Menu, 2 = NE App Menu)
-  uint8_t               activeMenu = 0;
+  uint8_t               activeMenu    = 0;
   std::vector<MenuItem> menuItems;
-  int                   menuHoverIdx = -1;
+  int                   menuHoverIdx  = -1;
+  int                   menuScroll    = 0;
+  bool                  menuThumbDrag = false;
   int16_t               menuX = 0, menuY = 0, menuW = 0, menuH = 0;
 
   // Touch gesture tracking
@@ -139,9 +140,16 @@ class WindowManager {
   void invalidateAll() { needsRedraw = true; }
   void invalidateWindow(Window& win);
 
+  // Font-responsive chrome metrics
+  int16_t topBarH() const   { return (hal.fontH() + 6 > 16) ? static_cast<int16_t>(hal.fontH() + 6) : 16; }
+  int16_t winTitleH() const { return static_cast<int16_t>(hal.fontH() + 4); }
+  int16_t menuRowH() const  { return static_cast<int16_t>(hal.fontH() + 4); }
+  void    onFontSizeChanged();
+
   // Launchers & Class-State Savepoints
   Window* launchTerseAppByClassName(const char* clsName);
   void    openEditAppCodeBrowser();
+  void    openConfigPanel();
   void    showBanner(const std::string& msg, uint32_t durationMs = 3500);
   void    openModalChoice(const std::string& title, const std::string& subtitle,
                           std::vector<ModalButton> buttons);

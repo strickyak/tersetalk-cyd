@@ -72,6 +72,7 @@ class HalCyd : public DisplayHal {
   bool isFlashMounted() const override { return flashOk; }
   void setRgbLed(bool r, bool g, bool b) override;
   void setBacklight(uint8_t level) override;
+  void saveDisplayConfig() override;
 
   bool pollSerialLine(std::string& outLine) override;
   void serialPrint(const char* s) override;
@@ -83,6 +84,7 @@ class HalCyd : public DisplayHal {
   bool readRawTouch(uint16_t& rawX, uint16_t& rawY);
   void loadCalibrationNvs();
   void saveCalibrationNvs();
+  void loadDisplayConfigNvs();
 };
 
 }  // namespace tt

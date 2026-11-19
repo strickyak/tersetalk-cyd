@@ -358,8 +358,8 @@ static void testClassStateSaveLoadAndAutoLog(VM& vm, HalMock& hal, WindowManager
   CHECK(wm.modalButtons.size() == 3);
   wm.render();
 
-  // Tap Button 0 ("Yes: Rename w_main.tt First...") inside modal at (100, 42 + 36 + 10)
-  hal.pushTap(100, 88);
+  // Tap Button 0 ("Yes: Rename w_main.tt First...") inside centered modal
+  hal.pushTap(100, 105);
   while (!hal.touchQueue.empty()) wm.tick();
   CHECK(!wm.modalActive);
   CHECK(wm.keyboard->active);
@@ -416,6 +416,126 @@ static void testClassStateSaveLoadAndAutoLog(VM& vm, HalMock& hal, WindowManager
   std::printf("[PASS] Class-State Savepoints, w_main.tt Rename/Clear Modal & Reboot Replay\n");
 }
 
+static void testFontsConfigAndScrollBars(VM& vm, HalMock& hal, WindowManager& wm) {
+  // 1. Verify all 4 pixel font specs (7=5x7, 8=6x8, 9=7x9, 10=8x10)
+  for (uint8_t sz = 7; sz <= 10; sz++) {
+    hal.setFontSize(sz);
+    CHECK(hal.fontSizePx() == sz);
+    CHECK(hal.fontW() == sz - 1);
+    CHECK(hal.fontH() == sz + 1);
+    FontSpec sp = getFontSpec(sz);
+    CHECK(sp.glyphW == sz - 2 && sp.glyphH == sz);
+    // Verify 'A', 'g', '0' have non-zero glyph rows
+    CHECK(getGlyphRows(sp, 'A')[2] != 0);
+    CHECK(getGlyphRows(sp, 'g')[sp.glyphH - 1] != 0 || getGlyphRows(sp, 'g')[sp.glyphH - 2] != 0);
+    CHECK(getGlyphRows(sp, '0')[1] != 0);
+  }
+  hal.setFontSize(7);
+  wm.onFontSizeChanged();
+
+  // 2. Open Config Panel & step Font Size 7 -> 8 -> 9 -> 10 and Brightness[-] via touch!
+  wm.openConfigPanel();
+  wm.render();
+  Window* cfg = wm.topWindow();
+  CHECK(cfg != nullptr && cfg->native != nullptr && std::strcmp(cfg->native->appName(), "Config") == 0);
+
+  for (int step = 0; step < 3; step++) {
+    int16_t cx, cy, cw, ch;
+    wm.getClientRect(*cfg, true, cx, cy, cw, ch);
+    int16_t fh      = hal.fontH();
+    int16_t fontBarY = static_cast<int16_t>(6 + fh + 4);
+    int16_t tapX     = static_cast<int16_t>(cx + cw - 12);
+    int16_t tapY     = static_cast<int16_t>(cy + fontBarY + 6);
+    hal.pushTap(tapX, tapY);
+    while (!hal.touchQueue.empty()) wm.tick();
+  }
+  CHECK(hal.activeFontSize == 10);
+  CHECK(hal.fontSizePx() == 10);
+
+  // Tap Brightness [-] button at Font Size 10
+  {
+    int16_t cx, cy, cw, ch;
+    wm.getClientRect(*cfg, true, cx, cy, cw, ch);
+    int16_t fh      = hal.fontH();
+    int16_t sliderH = static_cast<int16_t>(fh + 10);
+    int16_t brtBarY = static_cast<int16_t>((6 + fh + 4) + sliderH + 8 + fh + 4);
+    hal.pushTap(static_cast<int16_t>(cx + 14), static_cast<int16_t>(cy + brtBarY + 6));
+    while (!hal.touchQueue.empty()) wm.tick();
+  }
+  CHECK(hal.getBacklight() == 231);
+  CHECK(hal.savePPM("build/shot_11_config_panel_font10.ppm"));
+
+  // 3. Open NW Global Menu at Font Size 10 and test dropdown right-edge 10px ScrollBar Page DOWN!
+  hal.pushTap(6, 6);
+  while (!hal.touchQueue.empty()) wm.tick();
+  CHECK(wm.activeMenu == 1);
+  CHECK(wm.menuScroll == 0);
+  // Tap bottom Page-DOWN cap of dropdown scrollbar (must scroll without closing menu!)
+  hal.pushTap(static_cast<int16_t>(wm.menuX + wm.menuW - 4),
+              static_cast<int16_t>(wm.menuY + wm.menuH - 5));
+  while (!hal.touchQueue.empty()) wm.tick();
+  CHECK(wm.activeMenu == 1);
+  CHECK(wm.menuScroll > 0);
+  CHECK(hal.savePPM("build/shot_12_menu_scrollbar_font10.ppm"));
+
+  // Dismiss menu
+  hal.pushTap(310, 230);
+  while (!hal.touchQueue.empty()) wm.tick();
+  CHECK(wm.activeMenu == 0);
+
+  // 4. Test Class Browser ScrollBars + NoteApp ScrollBar (Page DOWN & Page UP) at Font Size 9!
+  hal.setFontSize(9);
+  wm.onFontSizeChanged();
+  wm.openEditAppCodeBrowser();
+  wm.render();
+  Window* brw = wm.topWindow();
+  CHECK(brw != nullptr);
+  {
+    // Toggle "All [v]" classes so Left Class List exceeds visible rows and shows ScrollBar
+    int16_t cx, cy, cw, ch;
+    wm.getClientRect(*brw, true, cx, cy, cw, ch);
+    hal.pushTap(static_cast<int16_t>(cx + 12), static_cast<int16_t>(cy + 4));
+    while (!hal.touchQueue.empty()) wm.tick();
+    // Tap Left Class List Page DOWN cap!
+    int16_t splitX = static_cast<int16_t>(cx + (cw * 2) / 5);
+    hal.pushTap(static_cast<int16_t>(splitX - 4), static_cast<int16_t>(cy + ch - 5));
+    while (!hal.touchQueue.empty()) wm.tick();
+  }
+
+  Window* nw = wm.launchTerseAppByClassName("NoteApp");
+  CHECK(nw != nullptr);
+  vm.evalCode(nw->appObj,
+    "b = Buf new. FOR(i: 28) DO(b ap: 'Line [i]: TerseTalk pixel font & scrollbar demo\n'). "
+    "body = b str. me dirty");
+  wm.render();
+  CHECK(asInt30(vm.evalCode(nw->appObj, "scrollTop")) == 0);
+  {
+    int16_t cx, cy, cw, ch;
+    wm.getClientRect(*nw, true, cx, cy, cw, ch);
+    // Tap NoteApp right-side ScrollBar Page DOWN cap (above the 8x8 SE window resize grip!)
+    hal.pushTap(static_cast<int16_t>(cx + cw - 4), static_cast<int16_t>(cy + ch - 12));
+    while (!hal.touchQueue.empty()) wm.tick();
+    int sc1 = asInt30(vm.evalCode(nw->appObj, "scrollTop"));
+    CHECK(sc1 > 0);
+    CHECK(hal.savePPM("build/shot_13_note_scrollbar_font9.ppm"));
+
+    // Tap NoteApp right-side ScrollBar Page UP cap
+    int16_t hdrH = static_cast<int16_t>(hal.fontH() + 6);
+    hal.pushTap(static_cast<int16_t>(cx + cw - 4), static_cast<int16_t>(cy + hdrH + 4));
+    while (!hal.touchQueue.empty()) wm.tick();
+    int sc2 = asInt30(vm.evalCode(nw->appObj, "scrollTop"));
+    CHECK(sc2 == 0);
+  }
+
+  // Restore defaults cleanly
+  hal.setFontSize(7);
+  hal.setBacklight(255);
+  wm.onFontSizeChanged();
+
+  gUiPassed++;
+  std::printf("[PASS] 4 Pixel Fonts (7..10), Config Panel Sliders & Proportional ScrollBars\n");
+}
+
 int main() {
   std::printf("=== TerseTalk-CYD Headless UI & Graphics Test Suite ===\n");
   HalMock hal;
@@ -431,6 +551,7 @@ int main() {
   testGraffitiKeyboardBrowserAndSerial(vm, hal, wm);
   testGenericDocumentFileOutFileIn(vm, hal, wm);
   testClassStateSaveLoadAndAutoLog(vm, hal, wm);
+  testFontsConfigAndScrollBars(vm, hal, wm);
 
   vm.destroy();
   std::printf("=== ALL %d UI & GRAPHICS TEST SUITES PASSED ===\n", gUiPassed);

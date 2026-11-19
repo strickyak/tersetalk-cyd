@@ -10,5 +10,6 @@ NativeWinController* createGraphicsPadController(const char* initialCode = nullp
 NativeWinController* createWorkspaceController(const char* initialCode = nullptr);
 NativeWinController* createClassBrowserController(const char* focusClassName = nullptr);
 NativeWinController* createFilesController(const char* initialDir = "/sd/docs");
+NativeWinController* createConfigController();
 
 }  // namespace tt

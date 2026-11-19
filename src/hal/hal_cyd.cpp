@@ -91,9 +91,11 @@ bool HalCyd::init() {
   tft.setRotation(1);
   tft.fillScreen(Color::kDarkBg);
 
-  // Bit-banged XPT2046 Touch + NVS calibration
+  // Bit-banged XPT2046 Touch + NVS calibration & display config
   initTouchPins();
   loadCalibrationNvs();
+  loadDisplayConfigNvs();
+  setBacklight(backlightLevel);
 
   // Immutable Flash filesystem (/flash)
   flashOk = LittleFS.begin(true, "/flash", 8, "spiffs");
@@ -170,6 +172,27 @@ void HalCyd::saveCalibrationNvs() {
     prefs.putFloat("u2",    calU2);
     prefs.putFloat("v1",    calV1);
     prefs.putFloat("v2",    calV2);
+    prefs.end();
+  }
+}
+
+void HalCyd::loadDisplayConfigNvs() {
+  Preferences prefs;
+  if (prefs.begin("cyd_cfg", true)) {
+    uint8_t fsz = prefs.getUChar("fontSz", 7);
+    uint8_t brt = prefs.getUChar("bright", 255);
+    prefs.end();
+    setFontSize(fsz);
+    if (brt < kMinBrightness) brt = kMinBrightness;
+    backlightLevel = brt;
+  }
+}
+
+void HalCyd::saveDisplayConfig() {
+  Preferences prefs;
+  if (prefs.begin("cyd_cfg", false)) {
+    prefs.putUChar("fontSz", activeFontSize);
+    prefs.putUChar("bright", backlightLevel);
     prefs.end();
   }
 }
@@ -287,11 +310,12 @@ void HalCyd::drawVLine(int16_t x, int16_t y, int16_t h, uint16_t color565) {
 void HalCyd::drawChar(int16_t x, int16_t y, char c, uint16_t fg565,
                       uint16_t bg565, bool transparentBg, uint8_t scale) {
   if (scale == 0) scale = 1;
-  const int16_t cw = kFontW * scale;
-  const int16_t ch = kFontH * scale;
+  const FontSpec spec = getFontSpec(activeFontSize);
+  const int16_t cw = static_cast<int16_t>(spec.cellW * scale);
+  const int16_t ch = static_cast<int16_t>(spec.cellH * scale);
   if (x + cw <= clipX0 || x >= clipX1 || y + ch <= clipY0 || y >= clipY1) return;
 
-  // Fast batched SPI write so each character uses a single CS transaction!
+  // Fast batched SPI write coalescing horizontal runs per row!
   tft.startWrite();
   if (!transparentBg) {
     int16_t rx0 = (x < clipX0) ? clipX0 : x;
@@ -300,28 +324,36 @@ void HalCyd::drawChar(int16_t x, int16_t y, char c, uint16_t fg565,
     int16_t ry1 = (y + ch > clipY1) ? clipY1 : static_cast<int16_t>(y + ch);
     if (rx0 < rx1 && ry0 < ry1) tft.fillRect(rx0, ry0, rx1 - rx0, ry1 - ry0, bg565);
   }
-  const uint8_t* cols = glyph5x7(c);
-  for (int col = 0; col < 5; col++) {
-    uint8_t bits = cols[col];
+  const uint8_t* rows = getGlyphRows(spec, c);
+  for (int row = 0; row < spec.glyphH; row++) {
+    uint8_t bits = rows[row];
     if (bits == 0) continue;
-    for (int row = 0; row < 7; row++) {
-      if (bits & (1u << row)) {
-        if (scale == 1) {
-          int16_t px = static_cast<int16_t>(x + col);
-          int16_t py = static_cast<int16_t>(y + row);
-          if (px >= clipX0 && px < clipX1 && py >= clipY0 && py < clipY1) {
-            tft.drawPixel(px, py, fg565);
-          }
+    int16_t ry0 = static_cast<int16_t>(y + row * scale);
+    int16_t ry1 = static_cast<int16_t>(ry0 + scale);
+    if (ry1 <= clipY0 || ry0 >= clipY1) continue;
+    if (ry0 < clipY0) ry0 = clipY0;
+    if (ry1 > clipY1) ry1 = clipY1;
+
+    int col = 0;
+    while (col < spec.glyphW) {
+      if ((bits & (1u << (spec.glyphW - 1 - col))) == 0) {
+        col++;
+        continue;
+      }
+      int startCol = col;
+      while (col < spec.glyphW && (bits & (1u << (spec.glyphW - 1 - col)))) {
+        col++;
+      }
+      int16_t rx0 = static_cast<int16_t>(x + startCol * scale);
+      int16_t rx1 = static_cast<int16_t>(x + col * scale);
+      if (rx0 < clipX0) rx0 = clipX0;
+      if (rx1 > clipX1) rx1 = clipX1;
+      if (rx0 < rx1) {
+        if (ry1 - ry0 == 1) {
+          if (rx1 - rx0 == 1) tft.drawPixel(rx0, ry0, fg565);
+          else tft.drawFastHLine(rx0, ry0, rx1 - rx0, fg565);
         } else {
-          int16_t rx0 = static_cast<int16_t>(x + col * scale);
-          int16_t ry0 = static_cast<int16_t>(y + row * scale);
-          int16_t rx1 = static_cast<int16_t>(rx0 + scale);
-          int16_t ry1 = static_cast<int16_t>(ry0 + scale);
-          if (rx0 < clipX0) rx0 = clipX0;
-          if (ry0 < clipY0) ry0 = clipY0;
-          if (rx1 > clipX1) rx1 = clipX1;
-          if (ry1 > clipY1) ry1 = clipY1;
-          if (rx0 < rx1 && ry0 < ry1) tft.fillRect(rx0, ry0, rx1 - rx0, ry1 - ry0, fg565);
+          tft.fillRect(rx0, ry0, rx1 - rx0, ry1 - ry0, fg565);
         }
       }
     }
@@ -363,6 +395,8 @@ void HalCyd::setRgbLed(bool r, bool g, bool b) {
 }
 
 void HalCyd::setBacklight(uint8_t level) {
+  if (level < kMinBrightness) level = kMinBrightness;
+  backlightLevel = level;
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
   ledcWrite(kPinBacklight, level);
 #else
