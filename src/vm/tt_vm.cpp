@@ -241,6 +241,23 @@ static void recalcVarsBelow(VM& vm, ObjCls* c) {
   }
   c->generation = gGenerationCounter++;
 
+  // Invalidate any already-compiled methods on `c` so instVar slot offsets recompile lazily!
+  if (isObj(c->methDict)) {
+    auto* md = reinterpret_cast<ObjDict*>(objFromOop(c->methDict));
+    for (uint32_t i = 0; i < md->cap; i++) {
+      Oop k = md->entries[i].key;
+      if (k == kOopNull || k == kOopSuper) continue;
+      Oop v = md->entries[i].val;
+      if (isObj(v) && objFromOop(v)->format == OBJ_METH) {
+        auto* m = reinterpret_cast<ObjMeth*>(objFromOop(v));
+        if (!m->isPrim && m->comp) {
+          freeCompiledCode(m->comp, vm.heap);
+          m->comp = nullptr;
+        }
+      }
+    }
+  }
+
   // Recurse into direct subclasses
   if (isObj(c->subsList)) {
     auto* subs = reinterpret_cast<ObjList*>(objFromOop(c->subsList));
@@ -271,16 +288,9 @@ void VM::defineVars(ObjCls* cls, const char* spaceSepVars, bool autoAccessors) {
     names.push_back(vname);
     listAppend(cls->myVarsList, newStr(vname.c_str(), vname.size()));
   }
-  cls->myVarCount = static_cast<uint16_t>(names.size());
+  cls->myVarCount   = static_cast<uint16_t>(names.size());
+  cls->varsModified = 1;
   recalcVarsBelow(*this, cls);
-
-  // If defining class-side vars on `FooCls` (whose sole instance `Foo` already exists
-  // as an `ObjCls`), store class-instance variables in `Foo`'s `savedInstsDict` or resize!
-  // Wait: in TerseTalk, `XCls defVars: 'y'` accesses `y` when `me` is `X` (`ObjCls`)!
-  // Let's check: how does `OP_GET_INST` work when `me` is an `ObjCls`?!
-  // Look at `execute`: if `self` is `OBJ_CLS`, we can store class-instance vars in a small
-  // `List` or `ObjSlots` — let's check `OP_GET_INST` / `OP_SET_INST` below so `XCls defVars: 'y'`
-  // works 100% identically to `ExprTest.testClassVar`!!
 
   if (autoAccessors) {
     bool prevLoad = loadingWorld;
@@ -288,8 +298,18 @@ void VM::defineVars(ObjCls* cls, const char* spaceSepVars, bool autoAccessors) {
     for (const auto& nm : names) {
       std::string setterSel  = nm + ":";
       std::string setterBody = nm + "=a. me";
-      addUsrMeth(cls, nm.c_str(), "", nm.c_str(), nm.size(), false, false);
-      addUsrMeth(cls, setterSel.c_str(), "", setterBody.c_str(), setterBody.size(), false, false);
+
+      Oop eg = dictGet(cls->methDict, makeSym(internSym(nm.c_str(), nm.size())));
+      if (!isObj(eg) || reinterpret_cast<ObjMeth*>(objFromOop(eg))->isAutoAccessor) {
+        ObjMeth* gm = addUsrMeth(cls, nm.c_str(), "", nm.c_str(), nm.size(), false, false);
+        if (gm) gm->isAutoAccessor = true;
+      }
+
+      Oop es = dictGet(cls->methDict, makeSym(internSym(setterSel.c_str(), setterSel.size())));
+      if (!isObj(es) || reinterpret_cast<ObjMeth*>(objFromOop(es))->isAutoAccessor) {
+        ObjMeth* sm = addUsrMeth(cls, setterSel.c_str(), "", setterBody.c_str(), setterBody.size(), false, false);
+        if (sm) sm->isAutoAccessor = true;
+      }
     }
     loadingWorld = prevLoad;
   }
@@ -306,9 +326,11 @@ ObjMeth* VM::addPrim(uint16_t clsId, const char* name, const char* abbrev, PrimF
   if (!c) return nullptr;
   auto* m = reinterpret_cast<ObjMeth*>(allocObj(CLS_PRIM_METH, OBJ_METH, 0, sizeof(ObjMeth)));
   m->onClsId   = clsId;
-  m->isPrim    = true;
-  m->ownsSource= false;
-  m->trace     = false;
+  m->isPrim       = true;
+  m->ownsSource   = false;
+  m->trace        = false;
+  m->isPrimordial = true;
+  m->isAutoAccessor = false;
   m->nameSym   = internSym(name);
   m->abbrevSym = (abbrev && abbrev[0]) ? internSym(abbrev) : m->nameSym;
   m->prim      = fn;
@@ -339,8 +361,10 @@ ObjMeth* VM::addUsrMeth(ObjCls* cls, const char* name, const char* abbrev,
 
   auto* m = reinterpret_cast<ObjMeth*>(allocObj(CLS_USR_METH, OBJ_METH, 0, sizeof(ObjMeth)));
   m->onClsId   = cls->clsId;
-  m->isPrim    = false;
-  m->trace     = false;
+  m->isPrim       = false;
+  m->trace        = false;
+  m->isPrimordial = false;
+  m->isAutoAccessor = false;
   m->nameSym   = nSym;
   m->abbrevSym = aSym;
   m->prim      = nullptr;
@@ -1178,16 +1202,16 @@ Oop VM::evalCode(Oop rcvr, const char* code, const Oop* args, uint8_t numArgs) {
 // ---------------------------------------------------------------------------
 // VM Bootstrap & Destruction
 // ---------------------------------------------------------------------------
-bool VM::init(uint32_t arenaBytes, bool loadBuiltinPrelude) {
-  destroy();
-  if (!heap.init(arenaBytes)) return false;
-
-  gcInhibit  = true;
-  loadingWorld = true;
-  sp         = 0;
-  frameCount = 0;
-  symCount   = 0;
-  classCount = 0;
+void VM::bootstrapCore() {
+  gcInhibit     = true;
+  loadingWorld  = true;
+  sp            = 0;
+  frameCount    = 0;
+  tempRootCount = 0;
+  symCount      = 0;
+  classCount    = 0;
+  nextOid       = 101;
+  interrupted   = false;
 
   // Pre-intern common binary & core selectors
   symAdd    = internSym("+");
@@ -1271,8 +1295,34 @@ bool VM::init(uint32_t arenaBytes, bool loadBuiltinPrelude) {
   dictPut(globalsDict, makeSym(internSym("javmeth")), classById[CLS_PRIM_METH]);
 
   installCorePrimitives(*this);
-
   gcInhibit = false;
+}
+
+void VM::markPrimordialState() {
+  for (uint16_t i = 1; i <= classCount; i++) {
+    ObjCls* c = clsById(i);
+    if (!c) continue;
+    c->isPrimordial = 1;
+    c->varsModified = 0;
+    if (isObj(c->methDict)) {
+      auto* md = reinterpret_cast<ObjDict*>(objFromOop(c->methDict));
+      for (uint32_t j = 0; j < md->cap; j++) {
+        Oop k = md->entries[j].key;
+        if (k == kOopNull || k == kOopSuper) continue;
+        Oop v = md->entries[j].val;
+        if (isObj(v) && objFromOop(v)->format == OBJ_METH) {
+          reinterpret_cast<ObjMeth*>(objFromOop(v))->isPrimordial = true;
+        }
+      }
+    }
+  }
+}
+
+bool VM::init(uint32_t arenaBytes, bool loadBuiltinPrelude) {
+  destroy();
+  if (!heap.init(arenaBytes)) return false;
+
+  bootstrapCore();
 
   if (loadBuiltinPrelude && kEmbeddedPreludeLen > 0) {
     std::string err;
@@ -1282,11 +1332,32 @@ bool VM::init(uint32_t arenaBytes, bool loadBuiltinPrelude) {
       return false;
     }
   }
+  markPrimordialState();
   loadingWorld = false;
   return true;
 }
 
-void VM::destroy() {
+bool VM::resetToPrelude(std::string* outErr) {
+  if (!heap.base) return false;
+  releaseHeapContents();
+  heap.resetInPlace();
+
+  bootstrapCore();
+
+  std::string err;
+  if (!loadWorldFile(*this, "pre0", "/flash/prelude.tt", &err)) {
+    if (!loadWorldBuffer(*this, "pre0", kEmbeddedPrelude, kEmbeddedPreludeLen, true, &err)) {
+      if (outErr) *outErr = err;
+      loadingWorld = false;
+      return false;
+    }
+  }
+  markPrimordialState();
+  loadingWorld = false;
+  return true;
+}
+
+void VM::releaseHeapContents() {
   if (heap.base) {
     // Sweep everything to release external buffers
     const uint32_t endHdrOff = heap.totalBytes - 4u;
@@ -1312,7 +1383,6 @@ void VM::destroy() {
     gcInhibit = false;
     runGC();
     host.markUiRoots = savedUiMark;
-    heap.destroy();
   }
   for (uint16_t i = 1; i <= symCount; i++) {
     std::free(symChars[i]);
@@ -1320,6 +1390,13 @@ void VM::destroy() {
   }
   symCount   = 0;
   classCount = 0;
+}
+
+void VM::destroy() {
+  releaseHeapContents();
+  if (heap.base) {
+    heap.destroy();
+  }
 }
 
 }  // namespace tt

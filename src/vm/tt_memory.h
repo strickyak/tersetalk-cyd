@@ -145,13 +145,15 @@ struct ObjMeth {
   ObjHeader     hdr;
   uint16_t      onClsId;
   bool          isPrim;
-  bool          ownsSource;    // False if source points into .rodata / static prelude
+  bool          ownsSource;     // False if source points into .rodata / static prelude
   bool          trace;
+  bool          isPrimordial;   // True for methods installed by C++ bootstrap or prelude.tt
+  bool          isAutoAccessor; // True for getter/setter synthesized by defineVars
   uint32_t      nameSym;
   uint32_t      abbrevSym;
   PrimFn        prim;
-  CompiledCode* comp;          // Lazily compiled for UsrMeth, or block code
-  const char*   source;        // Source code (owned heap char* or non-owned .rodata)
+  CompiledCode* comp;           // Lazily compiled for UsrMeth, or block code
+  const char*   source;         // Source code (owned heap char* or non-owned .rodata)
   uint32_t      sourceLen;
 };
 
@@ -162,8 +164,12 @@ struct ObjCls {
   uint16_t  clsId;             // Unique ID in VM::classById[]
   uint16_t  superClsId;        // 0 if none (Ur)
   uint16_t  generation;        // Incremented when methods/vars change
-  bool      isUsrCls;          // True for Usr and its subclasses
-  bool      trace;
+  uint8_t   isUsrCls     : 1;  // True for Usr and its subclasses
+  uint8_t   trace        : 1;
+  uint8_t   isPrimordial : 1;  // True for classes defined by C++ bootstrap or prelude.tt
+  uint8_t   varsModified : 1;  // True if defineVars was run after prelude.tt
+  uint8_t   flagsPad     : 4;
+  uint8_t   padByte;
   Oop       nameStr;           // Original-case Str
   uint32_t  nameSym;           // Lowercase SymId
   Oop       methDict;          // ObjDict (Str/Sym -> ObjMeth)
@@ -246,6 +252,7 @@ struct HeapArena {
   uint32_t searchCursor  = 4;  // Next-fit cursor (points to 4B block header)
 
   bool init(uint32_t arenaBytes);
+  void resetInPlace();
   void destroy();
 
   // Allocates an 8-byte-aligned block of at least `payloadBytes` (zero-initialized).

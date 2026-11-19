@@ -19,6 +19,12 @@ struct MenuItem {
   std::function<void()> nativeAction; // Or C++ callback (for Global Menu / Native IDE windows)
 };
 
+struct ModalButton {
+  std::string label;
+  uint16_t    bgColor = 0x2104;
+  std::function<void()> action;
+};
+
 // Optional C++ controller for built-in IDE / Scratchpad windows
 class NativeWinController {
  public:
@@ -103,6 +109,12 @@ class WindowManager {
   std::string statusBanner;
   uint32_t    bannerExpireMs = 0;
 
+  // Modal Choice Overlay (e.g. asking whether to rename auto-log before loading Class State)
+  bool                     modalActive = false;
+  std::string              modalTitle;
+  std::string              modalSubtitle;
+  std::vector<ModalButton> modalButtons;
+
   VirtualKeyboard* keyboard = nullptr;
 
   WindowManager(VM& v, DisplayHal& h);
@@ -121,15 +133,24 @@ class WindowManager {
 
   void focusWindowSlot(int slot);
   void closeWindowSlot(int slot);
+  void closeAllWindows(bool runOnClose = false);
   void setMaximized(bool maxMode);
   void toggleMaximized() { setMaximized(!maximized); }
   void invalidateAll() { needsRedraw = true; }
   void invalidateWindow(Window& win);
 
-  // Launchers
+  // Launchers & Class-State Savepoints
   Window* launchTerseAppByClassName(const char* clsName);
   void    openEditAppCodeBrowser();
   void    showBanner(const std::string& msg, uint32_t durationMs = 3500);
+  void    openModalChoice(const std::string& title, const std::string& subtitle,
+                          std::vector<ModalButton> buttons);
+  std::string nextAutoLogBackupName() const;
+  std::string nextSavepointName() const;
+  void    promptSaveClassState();
+  void    requestLoadClassState(const std::string& vfsPath);
+  bool    performLoadClassState(const std::string& vfsPath, const std::string& renameAutoLogTo,
+                                std::string* outStatus = nullptr);
 
   // Shared Stylus Keyboard / Graffiti Text Prompt Overlay
   void openTextPrompt(const char* promptTitle, const std::string& initialText,
@@ -158,6 +179,7 @@ class WindowManager {
   void renderTopBar();
   void renderMaximizedWedges();
   void renderDropdown();
+  void renderModal();
   void handleTouchDown(int16_t tx, int16_t ty);
   void handleTouchMove(int16_t tx, int16_t ty);
   void handleTouchUp(int16_t tx, int16_t ty);

@@ -2604,6 +2604,26 @@ static Oop primSysFail(VM& vm, Oop, const Oop*, uint8_t) {
 static Oop primSysFail1(VM& vm, Oop, const Oop* args, uint8_t) {
   vm.toss("%s", vm.toStdString(args[0]).c_str());
 }
+static Oop primSysStateDiff(VM& vm, Oop, const Oop*, uint8_t) {
+  std::string diff = serializeClassState(vm);
+  return vm.newStr(diff.data(), diff.size());
+}
+static Oop primSysSaveState(VM& vm, Oop, const Oop* args, uint8_t) {
+  std::string nm = reqStdStr(vm, args[0], "Sys saveState:");
+  std::string resolved, err;
+  if (!saveClassState(vm, nm.c_str(), &resolved, &err)) {
+    vm.toss("Sys saveState: %s", err.c_str());
+  }
+  return vm.newStr(resolved.data(), resolved.size());
+}
+static Oop primClsIsPrimordial(VM&, Oop rcvr, const Oop*, uint8_t) {
+  auto* c = reinterpret_cast<ObjCls*>(objFromOop(rcvr));
+  return makeBool(c->isPrimordial != 0);
+}
+static Oop primMethIsPrimordial(VM&, Oop rcvr, const Oop*, uint8_t) {
+  auto* m = reinterpret_cast<ObjMeth*>(objFromOop(rcvr));
+  return makeBool(m->isPrimordial);
+}
 
 static std::string normalizeFilePath(VM& vm, const std::string& p) {
   if (p.empty()) return vm.host.vfsRead ? "/sd" : ".";
@@ -2956,11 +2976,13 @@ void installCorePrimitives(VM& vm) {
   vm.addPrim(CLS_CLS, "def:c:",     "",         primClsDefC);
   vm.addPrim(CLS_CLS, "defineMethod:abbrev:doc:code:", "defMeth:a:d:c:", primClsDefMeth4);
   vm.addPrim(CLS_CLS, "trace:",     "",         primClsTrace);
+  vm.addPrim(CLS_CLS, "isPrimordial","",        primClsIsPrimordial);
 
   vm.addPrim(CLS_METH, "onCls",     "",         primMethOnCls);
   vm.addPrim(CLS_METH, "name",      "",         primMethName);
   vm.addPrim(CLS_METH, "abbrev",    "",         primMethAbbrev);
   vm.addPrim(CLS_METH, "doc",       "",         primMethDoc);
+  vm.addPrim(CLS_METH, "isPrimordial","",       primMethIsPrimordial);
   vm.addPrim(CLS_METH, "applyFrame:receiver:args:", "", primMethApply);
   vm.addPrim(CLS_USR_METH, "src",   "",         primUsrMethSrc);
 
@@ -2993,6 +3015,8 @@ void installCorePrimitives(VM& vm) {
   vm.addPrim(CLS_SYS_CLS, "usedMem","",         primSysUsedMem);
   vm.addPrim(CLS_SYS_CLS, "fail",   "",         primSysFail);
   vm.addPrim(CLS_SYS_CLS, "fail:",  "",         primSysFail1);
+  vm.addPrim(CLS_SYS_CLS, "stateDiff", "",      primSysStateDiff);
+  vm.addPrim(CLS_SYS_CLS, "saveState:", "",     primSysSaveState);
 
   vm.addPrim(CLS_FILE_CLS, "dir",   "",         primFileDir);
   vm.addPrim(CLS_FILE_CLS, "dir:",  "",         primFileDir1);

@@ -2,6 +2,7 @@
 #include "tt_ide.h"
 #include "tt_keyboard.h"
 #include "tt_pen.h"
+#include "vm/tt_world.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -189,6 +190,33 @@ void WindowManager::closeWindowSlot(int slot) {
   needsRedraw = true;
 }
 
+void WindowManager::closeAllWindows(bool runOnClose) {
+  for (int i = 0; i < kMaxWindows; i++) {
+    if (!windows[i].alive) continue;
+    if (runOnClose && isObj(windows[i].appObj)) {
+      uint32_t closeSym = vm.internSym("onclose");
+      if (vm.lookupMeth(vm.oopClsId(windows[i].appObj), closeSym)) {
+        try {
+          vm.ticksRemaining = 500000;
+          vm.send(windows[i].appObj, closeSym, nullptr, 0);
+        } catch (const TerseError&) {}
+      }
+    }
+    delete windows[i].native;
+    windows[i].native         = nullptr;
+    windows[i].appObj         = kOopNil;
+    windows[i].winObj         = kOopNil;
+    windows[i].alive          = false;
+    windows[i].animIntervalMs = 0;
+  }
+  zCount      = 0;
+  maximized   = false;
+  activeMenu  = 0;
+  modalActive = false;
+  if (keyboard) keyboard->close();
+  needsRedraw = true;
+}
+
 void WindowManager::setMaximized(bool maxMode) {
   if (maxMode && zCount == 0) return;
   if (keyboard) keyboard->close();
@@ -255,9 +283,191 @@ void WindowManager::showBanner(const std::string& msg, uint32_t durationMs) {
 
 void WindowManager::openTextPrompt(const char* promptTitle, const std::string& initialText,
                                    bool multiline, std::function<void(const std::string&)> onAccept) {
-  activeMenu = 0;
+  activeMenu  = 0;
+  modalActive = false;
   keyboard->open(promptTitle, initialText, multiline, std::move(onAccept));
   needsRedraw = true;
+}
+
+void WindowManager::openModalChoice(const std::string& title, const std::string& subtitle,
+                                    std::vector<ModalButton> buttons) {
+  activeMenu    = 0;
+  dropdownDirty = false;
+  if (keyboard) keyboard->close();
+  modalTitle    = title;
+  modalSubtitle = subtitle;
+  modalButtons  = std::move(buttons);
+  modalActive   = true;
+  needsRedraw   = true;
+}
+
+static std::string baseFileName(const std::string& p) {
+  size_t sl = p.rfind('/');
+  return (sl == std::string::npos) ? p : p.substr(sl + 1);
+}
+
+std::string WindowManager::nextAutoLogBackupName() const {
+  std::vector<std::pair<std::string, uint32_t>> files;
+  vm.listVfsFiles("/sd/worlds", files);
+  for (int idx = 1; idx < 1000; idx++) {
+    std::string cand = "w_bak_" + std::to_string(idx);
+    std::string fn   = cand + ".tt";
+    bool exists = false;
+    for (const auto& kv : files) {
+      if (kv.first == fn) { exists = true; break; }
+    }
+    if (!exists) return cand;
+  }
+  return "w_bak";
+}
+
+std::string WindowManager::nextSavepointName() const {
+  std::vector<std::pair<std::string, uint32_t>> files;
+  vm.listVfsFiles("/sd/worlds", files);
+  for (int idx = 1; idx < 1000; idx++) {
+    std::string cand = "save" + std::to_string(idx);
+    std::string fn   = cand + ".tt";
+    bool exists = false;
+    for (const auto& kv : files) {
+      if (kv.first == fn) { exists = true; break; }
+    }
+    if (!exists) return cand;
+  }
+  return "save";
+}
+
+void WindowManager::promptSaveClassState() {
+  openTextPrompt("Save World (/sd/worlds/*.tt)", nextSavepointName(), false,
+                 [this](const std::string& nm) {
+                   if (nm.empty()) return;
+                   std::string resolved, err;
+                   if (saveClassState(vm, nm.c_str(), &resolved, &err)) {
+                     showBanner("Saved world: " + baseFileName(resolved));
+                   } else {
+                     showBanner(err);
+                   }
+                 });
+}
+
+bool WindowManager::performLoadClassState(const std::string& vfsPath,
+                                          const std::string& renameAutoLogTo,
+                                          std::string* outStatus) {
+  // 1. Read target savepoint file BEFORE touching w_main.tt (in case vfsPath == w_main.tt!)
+  std::string targetContent;
+  if (!vfsPath.empty()) {
+    if (!vm.readVfsFile(vfsPath.c_str(), targetContent)) {
+      std::string msg = "Cannot read " + vfsPath;
+      if (outStatus) *outStatus = msg;
+      showBanner(msg);
+      return false;
+    }
+  }
+
+  // 2. Optionally rename auto-log w_main.tt first
+  std::string renamedNote;
+  if (!renameAutoLogTo.empty() && !vm.worldPath.empty()) {
+    std::string bakPath = normalizeStatePath(renameAutoLogTo);
+    if (bakPath == vm.worldPath) {
+      std::string msg = "Backup name cannot be w_main";
+      if (outStatus) *outStatus = msg;
+      showBanner(msg);
+      return false;
+    }
+    std::string oldLog;
+    if (vm.readVfsFile(vm.worldPath.c_str(), oldLog) && !oldLog.empty()) {
+      if (!vm.writeVfsFile(bakPath.c_str(), oldLog.data(), oldLog.size(), false)) {
+        std::string msg = "Failed writing backup " + bakPath;
+        if (outStatus) *outStatus = msg;
+        showBanner(msg);
+        return false;
+      }
+      renamedNote = "w_main->" + baseFileName(bakPath) + "; ";
+    }
+  }
+
+  // 3. Clear w_main.tt before loading
+  if (!vm.worldPath.empty()) {
+    vm.deleteVfsFile(vm.worldPath.c_str());
+  }
+
+  // 4. Close all windows & reset VM cleanly in-place to Primordial Prelude
+  closeAllWindows(false);
+  std::string err;
+  if (!vm.resetToPrelude(&err)) {
+    std::string msg = "Prelude reset failed: " + err;
+    if (outStatus) *outStatus = msg;
+    showBanner(msg);
+    return false;
+  }
+  installGraphicsPrimitives(vm, &hal, this);
+  vm.markPrimordialState();
+
+  // 5. Replay selected savepoint (if non-empty) and seed clean w_main.tt so future boots match
+  bool ok = true;
+  if (!vfsPath.empty()) {
+    ok = loadWorldBuffer(vm, vm.worldName.c_str(), targetContent.data(), targetContent.size(), false, &err);
+    if (!vm.worldPath.empty()) {
+      std::string freshDiff = serializeClassState(vm);
+      if (!freshDiff.empty()) {
+        std::string seeded = "# Base state: " + baseFileName(vfsPath) + "\n\n" + freshDiff;
+        vm.writeVfsFile(vm.worldPath.c_str(), seeded.data(), seeded.size(), false);
+      }
+    }
+  }
+
+  // 6. Re-open fresh desktop windows
+  initDesktop();
+
+  std::string msg;
+  if (!ok) {
+    msg = "Load err: " + err;
+  } else if (vfsPath.empty()) {
+    msg = renamedNote + "Reset to Primordial Prelude";
+  } else {
+    msg = renamedNote + "Loaded " + baseFileName(vfsPath);
+  }
+  if (outStatus) *outStatus = msg;
+  showBanner(msg, 4500);
+  return ok;
+}
+
+void WindowManager::requestLoadClassState(const std::string& vfsPath) {
+  if (!vfsPath.empty()) {
+    std::string probe;
+    if (!vm.readVfsFile(vfsPath.c_str(), probe)) {
+      showBanner("Cannot read " + vfsPath);
+      return;
+    }
+  }
+
+  std::string oldLog;
+  bool hasAutoLog = !vm.worldPath.empty() &&
+                    vm.readVfsFile(vm.worldPath.c_str(), oldLog) &&
+                    !oldLog.empty();
+
+  if (!hasAutoLog) {
+    performLoadClassState(vfsPath, "");
+    return;
+  }
+
+  std::string title = vfsPath.empty()
+                    ? "Reset to Primordial Prelude"
+                    : ("Load World: " + baseFileName(vfsPath));
+  openModalChoice(
+    title,
+    "Rename auto-log w_main.tt before clearing?",
+    {
+      {"Yes: Rename w_main.tt First...", 0x03E0, [this, vfsPath]() {
+        openTextPrompt("Rename w_main.tt as (/sd/worlds/*.tt)", nextAutoLogBackupName(), false,
+                       [this, vfsPath](const std::string& bak) {
+                         if (!bak.empty()) performLoadClassState(vfsPath, bak);
+                       });
+      }},
+      {"No: Clear w_main.tt & Load", 0x8200, [this, vfsPath]() {
+        performLoadClassState(vfsPath, "");
+      }},
+      {"Cancel", Color::kKeyBg, []() {}}
+    });
 }
 
 void WindowManager::getClientRect(const Window& win, bool isTop,
@@ -290,6 +500,11 @@ void WindowManager::buildGlobalMenu(std::vector<MenuItem>& out) {
     if (maximized) maximized = false;
     createNativeWindow(createFilesController("/sd/docs"), "Documents & Files", 18, 24, 284, 198);
   }});
+  out.push_back({"Save World",        "", [this]() { promptSaveClassState(); }});
+  out.push_back({"Load World",        "", [this]() {
+    if (maximized) maximized = false;
+    createNativeWindow(createFilesController("/sd/worlds"), "Worlds (/sd/worlds)", 18, 24, 284, 198);
+  }});
   out.push_back({"+ Graphics Pad",   "", [this]() { launchTerseAppByClassName("PadApp"); }});
   out.push_back({"+ Note Pad",       "", [this]() { launchTerseAppByClassName("NoteApp"); }});
   out.push_back({"+ Workspace",      "", [this]() {
@@ -305,10 +520,6 @@ void WindowManager::buildGlobalMenu(std::vector<MenuItem>& out) {
   out.push_back({"App: Conway Life", "", [this]() { launchTerseAppByClassName("LifeApp"); }});
   out.push_back({"App: Paint Pad",   "", [this]() { launchTerseAppByClassName("PaintApp"); }});
   out.push_back({"Class Browser",    "", [this]() { openEditAppCodeBrowser(); }});
-  out.push_back({"Files (/sd,/flash)","",[this]() {
-    if (maximized) maximized = false;
-    createNativeWindow(createFilesController("/sd"), "Files", 24, 28, 272, 194);
-  }});
   out.push_back({"Calibrate Touch",  "", [this]() {
     hal.runTouchCalibration();
     needsRedraw = true;
@@ -555,6 +766,27 @@ void WindowManager::renderDropdown() {
   }
 }
 
+void WindowManager::renderModal() {
+  if (!modalActive) return;
+  hal.resetClipRect();
+  const int16_t bx = 22, by = 42, bw = 276;
+  const int16_t bh = static_cast<int16_t>(42 + modalButtons.size() * 28);
+  hal.fillRect(bx + 3, by + 3, bw, bh, Color::kBlack);
+  hal.fillRect(bx, by, bw, bh, Color::kMenuBg);
+  hal.drawRect(bx, by, bw, bh, Color::kAccent);
+  hal.fillRect(bx + 1, by + 1, bw - 2, 14, Color::kTitleFocus);
+  hal.drawHLine(bx + 1, by + 15, bw - 2, Color::kBorder);
+  hal.drawTextClipped(bx + 6, by + 4, bw - 12, modalTitle.c_str(), Color::kAccent);
+  hal.drawTextClipped(bx + 6, by + 21, bw - 12, modalSubtitle.c_str(), Color::kWhite);
+
+  for (size_t i = 0; i < modalButtons.size(); i++) {
+    int16_t ry = static_cast<int16_t>(by + 36 + i * 28);
+    hal.fillRoundRect(bx + 10, ry, bw - 20, 22, 3, modalButtons[i].bgColor);
+    hal.drawRect(bx + 10, ry, bw - 20, 22, Color::kBorder);
+    hal.drawTextClipped(bx + 18, ry + 7, bw - 36, modalButtons[i].label.c_str(), Color::kWhite);
+  }
+}
+
 void WindowManager::render() {
   if (keyboard->active) {
     keyboard->render(hal);
@@ -586,6 +818,10 @@ void WindowManager::render() {
 
   if (activeMenu != 0) {
     renderDropdown();
+  }
+
+  if (modalActive) {
+    renderModal();
   }
 
   if (!statusBanner.empty()) {
@@ -639,6 +875,23 @@ void WindowManager::handleTouchDown(int16_t tx, int16_t ty) {
     if (!keyboard->active) {
       keyboardDirty = false;
       needsRedraw   = true;
+    }
+    return;
+  }
+
+  if (modalActive) {
+    const int16_t bx = 22, by = 42, bw = 276;
+    if (tx >= bx + 10 && tx < bx + bw - 10) {
+      for (size_t i = 0; i < modalButtons.size(); i++) {
+        int16_t ry = static_cast<int16_t>(by + 36 + i * 28);
+        if (ty >= ry && ty < ry + 22) {
+          auto fn = modalButtons[i].action;
+          modalActive = false;
+          needsRedraw = true;
+          if (fn) fn();
+          return;
+        }
+      }
     }
     return;
   }
@@ -865,7 +1118,7 @@ void WindowManager::tick() {
 
   // 2. Dispatch periodic `onTick` animation ONLY on the topmost focused window!
   //    Background windows stay paused so they never fight for focus or redraw over/under top!
-  if (!keyboard->active && activeMenu == 0) {
+  if (!keyboard->active && activeMenu == 0 && !modalActive) {
     if (Window* top = topWindow()) {
       uint32_t now = hal.millis();
       if (top->animIntervalMs > 0 && (now - top->lastStepMs) >= top->animIntervalMs) {

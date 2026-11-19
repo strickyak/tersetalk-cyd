@@ -83,9 +83,16 @@ bool HeapArena::init(uint32_t arenaBytes) {
 #endif
   std::memset(base, 0, arenaBytes);
   totalBytes    = arenaBytes;
+  resetInPlace();
+  return true;
+}
+
+void HeapArena::resetInPlace() {
+  if (!base || totalBytes < 16u) return;
+  std::memset(base, 0, totalBytes);
   usedBytes     = 0;
   externalBytes = 0;
-  gcThreshold   = (arenaBytes * 3u) / 4u;
+  gcThreshold   = (totalBytes * 3u) / 4u;
   gcCount       = 0;
   searchCursor  = 4u;
 
@@ -96,7 +103,6 @@ bool HeapArena::init(uint32_t arenaBytes) {
   *reinterpret_cast<uint32_t*>(base + totalBytes - 4u) = BLK_USED;
 
   gArenaBase = base;
-  return true;
 }
 
 void HeapArena::destroy() {

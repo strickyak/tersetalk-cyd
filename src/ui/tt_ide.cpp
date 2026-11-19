@@ -319,6 +319,31 @@ class ClassBrowserController : public NativeWinController {
                       });
   }
 
+  static bool isClassModified(ObjCls* c) {
+    if (!c) return false;
+    if (!c->isPrimordial || c->varsModified) return true;
+    if (!isObj(c->methDict)) return false;
+    auto* md = reinterpret_cast<ObjDict*>(objFromOop(c->methDict));
+    for (uint32_t i = 0; i < md->cap; i++) {
+      Oop k = md->entries[i].key;
+      if (k == kOopNull || k == kOopSuper) continue;
+      Oop v = md->entries[i].val;
+      if (isObj(v) && objFromOop(v)->format == OBJ_METH) {
+        auto* m = reinterpret_cast<ObjMeth*>(objFromOop(v));
+        if (!m->isPrim && !m->isPrimordial && !m->isAutoAccessor) return true;
+      }
+    }
+    return false;
+  }
+
+  static bool isMethModified(VM& vm, ObjCls* c, const std::string& sel) {
+    if (!c || !isObj(c->methDict)) return false;
+    Oop mOop = vm.dictGet(c->methDict, makeSym(vm.internSym(sel.c_str(), sel.size())));
+    if (!isObj(mOop) || objFromOop(mOop)->format != OBJ_METH) return false;
+    auto* m = reinterpret_cast<ObjMeth*>(objFromOop(mOop));
+    return !m->isPrim && !m->isPrimordial && !m->isAutoAccessor;
+  }
+
   void onPaint(VM& vm, DisplayHal& hal, Window&,
                int16_t cx, int16_t cy, int16_t cw, int16_t ch) override {
     hal.fillRect(cx, cy, cw, ch, Color::kWinBg);
@@ -354,13 +379,18 @@ class ClassBrowserController : public NativeWinController {
       const std::string& nm = classes[clsScroll + i];
       int16_t ry = static_cast<int16_t>(cy + 15 + i * (kFontH + 2));
       bool sel = (nm == selectedCls);
+      Oop co = vm.dictGet(vm.globalsDict, makeSym(vm.internSym(nm.c_str(), nm.size())));
+      bool mod = (isObj(co) && objFromOop(co)->format == OBJ_CLS) &&
+                 isClassModified(reinterpret_cast<ObjCls*>(objFromOop(co)));
       if (sel) hal.fillRect(cx + 1, ry - 1, splitX - cx - 2, kFontH + 2, Color::kMenuSel);
-      hal.drawTextClipped(cx + 3, ry, splitX - cx - 5, nm.c_str(), sel ? Color::kAccent : Color::kWhite);
+      std::string disp = mod ? ("*" + nm) : nm;
+      uint16_t fg = sel ? Color::kAccent : (mod ? Color::kCyan : Color::kWhite);
+      hal.drawTextClipped(cx + 3, ry, splitX - cx - 5, disp.c_str(), fg);
     }
 
     // Right Pane: Vars + Methods
     if (!c) return;
-    std::string varsLine = "vars: ";
+    std::string varsLine = c->varsModified ? "*vars: " : "vars: ";
     auto* vl = reinterpret_cast<ObjList*>(objFromOop(c->myVarsList));
     for (uint32_t i = 0; i < vl->len; i++) {
       if (i > 0) varsLine.push_back(' ');
@@ -376,8 +406,11 @@ class ClassBrowserController : public NativeWinController {
     }
     for (int i = 0; i < mVis && (methScroll + i) < static_cast<int>(meths.size()); i++) {
       const std::string& ms = meths[methScroll + i];
+      bool mod = isMethModified(vm, c, ms);
+      std::string disp = mod ? ("*" + ms) : ms;
       int16_t ry = static_cast<int16_t>(cy + 15 + (i + 1) * (kFontH + 2));
-      hal.drawTextClipped(splitX + 4, ry, cx + cw - splitX - 6, ms.c_str(), Color::kWhite);
+      hal.drawTextClipped(splitX + 4, ry, cx + cw - splitX - 6, disp.c_str(),
+                          mod ? Color::kAccent : Color::kWhite);
     }
   }
 
@@ -482,6 +515,16 @@ class ClassBrowserController : public NativeWinController {
     out.push_back({"Launch Selected Class", "", [this, &wm]() {
       wm.launchTerseAppByClassName(selectedCls.c_str());
     }});
+    out.push_back({"Save World", "", [&wm]() {
+      wm.promptSaveClassState();
+    }});
+    out.push_back({"Load World", "", [&wm]() {
+      if (wm.maximized) wm.maximized = false;
+      wm.createNativeWindow(createFilesController("/sd/worlds"), "Worlds (/sd/worlds)", 18, 24, 284, 198);
+    }});
+    out.push_back({"Reset to Prelude...", "", [&wm]() {
+      wm.requestLoadClassState("");
+    }});
   }
 };
 
@@ -503,6 +546,10 @@ class FilesController : public NativeWinController {
 
   static bool isDocFile(const std::string& nm) {
     return nm.size() > 4 && nm.substr(nm.size() - 4) == ".doc";
+  }
+
+  static bool isStateFile(const std::string& dir, const std::string& nm) {
+    return dir != "/flash" && nm.size() > 3 && nm.substr(nm.size() - 3) == ".tt";
   }
 
   void openSelectedDoc(VM& vm, WindowManager& wm) {
@@ -537,6 +584,10 @@ class FilesController : public NativeWinController {
     drawTab(cx + 39,  30, "/sd",    "/sd");
     drawTab(cx + 72,  46, "Worlds", "/sd/worlds");
     drawTab(cx + 121, 40, "Flash",  "/flash");
+    if (currentDir == "/sd/worlds") {
+      hal.fillRoundRect(cx + cw - 38, cy + 1, 36, 12, 2, 0x03E0);
+      hal.drawText(cx + cw - 34, cy + 3, "+Save", Color::kWhite);
+    }
 
     std::vector<std::pair<std::string, uint32_t>> files;
     vm.listVfsFiles(currentDir.c_str(), files);
@@ -560,11 +611,15 @@ class FilesController : public NativeWinController {
     if (!previewName.empty() && ry + 14 < cy + ch) {
       hal.drawHLine(cx, ry + 1, cw, Color::kBorder);
       ry += 4;
-      hal.drawTextClipped(cx + 4, ry, cw - 66, previewName.c_str(), Color::kCyan);
+      hal.drawTextClipped(cx + 4, ry, cw - 72, previewName.c_str(), Color::kCyan);
       if (isDocFile(previewName)) {
         openBtnY = static_cast<int16_t>(ry - cy - 2);
         hal.fillRoundRect(cx + cw - 56, ry - 2, 52, 11, 2, 0x03E0);
         hal.drawText(cx + cw - 52, ry, "Open Doc", Color::kWhite);
+      } else if (isStateFile(currentDir, previewName)) {
+        openBtnY = static_cast<int16_t>(ry - cy - 2);
+        hal.fillRoundRect(cx + cw - 68, ry - 2, 65, 11, 2, 0x03E0);
+        hal.drawText(cx + cw - 65, ry, "Load World", Color::kWhite);
       }
       ry += 11;
       size_t p = 0;
@@ -587,20 +642,31 @@ class FilesController : public NativeWinController {
     wm.getClientRect(win, wm.topWindow() == &win, cx, cy, cw, ch);
 
     if (ly <= 14) {
+      if (currentDir == "/sd/worlds" && lx >= cw - 40) {
+        wm.promptSaveClassState();
+        return;
+      }
       if (lx < 38) currentDir = "/sd/docs";
       else if (lx < 71) currentDir = "/sd";
       else if (lx < 120) currentDir = "/sd/worlds";
-      else currentDir = "/flash";
+      else if (lx < 164) currentDir = "/flash";
       previewName.clear();
       previewBody.clear();
       wm.invalidateWindow(win);
       return;
     }
 
-    // Check [Open Doc] button tap in preview header!
-    if (openBtnY > 0 && ly >= openBtnY && ly <= openBtnY + 13 && lx >= cw - 58 && isDocFile(previewName)) {
-      openSelectedDoc(vm, wm);
-      return;
+    // Check [Open Doc] or [Load World] button tap in preview header!
+    if (openBtnY > 0 && ly >= openBtnY && ly <= openBtnY + 13) {
+      if (lx >= cw - 58 && isDocFile(previewName)) {
+        openSelectedDoc(vm, wm);
+        return;
+      }
+      if (lx >= cw - 70 && isStateFile(currentDir, previewName)) {
+        std::string full = currentDir + "/" + previewName;
+        wm.requestLoadClassState(full);
+        return;
+      }
     }
 
     int idx = (ly - 17) / 10;
@@ -624,6 +690,17 @@ class FilesController : public NativeWinController {
         openSelectedDoc(vm, wm);
       }});
     }
+    if (isStateFile(currentDir, previewName)) {
+      out.push_back({"Load World", "", [this, &wm]() {
+        wm.requestLoadClassState(currentDir + "/" + previewName);
+      }});
+    }
+    out.push_back({"Save World", "", [&wm]() {
+      wm.promptSaveClassState();
+    }});
+    out.push_back({"Reset to Prelude...", "", [&wm]() {
+      wm.requestLoadClassState("");
+    }});
     out.push_back({"Run Selected Script", "", [this, &vm, &wm, &win]() {
       if (previewName.empty()) return;
       std::string full = currentDir + "/" + previewName;
@@ -641,12 +718,12 @@ class FilesController : public NativeWinController {
         wm.invalidateWindow(win);
       }
     }});
-    out.push_back({"Load Selected World", "", [this, &vm, &wm, &win]() {
+    out.push_back({"Overlay .tt (No Reset)", "", [this, &vm, &wm, &win]() {
       if (previewName.empty()) return;
       std::string full = currentDir + "/" + previewName;
       std::string err;
       if (loadWorldFile(vm, vm.worldName.c_str(), full.c_str(), &err)) {
-        wm.showBanner("Loaded " + previewName);
+        wm.showBanner("Merged " + previewName);
       } else {
         wm.showBanner(err);
       }

@@ -76,21 +76,25 @@ void SerialRepl::processLine(const std::string& line) {
     if (verb == ":help") {
       hal.serialPrint(
         "Commands:\r\n"
-        "  <expr>            Evaluate TerseTalk expression\r\n"
-        "  :ls [dir]         List /sd, /sd/worlds, or /flash\r\n"
-        "  :cat <path>       Print file contents\r\n"
-        "  :put <path>       Write lines into /sd/... until :eof\r\n"
-        "  :load <path>      Load world definitions (.tt) file\r\n"
-        "  :docs             List saved documents in /sd/docs\r\n"
-        "  :doc <name>       Open a saved document on CYD display\r\n"
-        "  :open <AppCls>    Launch App window on CYD display\r\n"
-        "  :max | :overlap   Switch display window layout\r\n"
-        "  :gc  | :mem       Run GC and display memory stats\r\n"
+        "  <expr>                  Evaluate TerseTalk expression\r\n"
+        "  :ls [dir]               List /sd, /sd/worlds, or /flash\r\n"
+        "  :cat <path>             Print file contents\r\n"
+        "  :put <path>             Write lines into /sd/... until :eof\r\n"
+        "  :states | :diff         List /sd/worlds/*.tt or print non-primordial diff\r\n"
+        "  :save <name>            Save Class State savepoint (/sd/worlds/<name>.tt)\r\n"
+        "  :loadstate <nm> [bak|-] Clean-reload savepoint (bak = rename w_main, - = clear)\r\n"
+        "  :reset [bak|-]          Clean-reset to Primordial Prelude\r\n"
+        "  :load <path>            Overlay .tt definitions without resetting\r\n"
+        "  :docs | :doc <name>     List or open saved App documents (/sd/docs)\r\n"
+        "  :open <AppCls>          Launch App window on CYD display\r\n"
+        "  :max | :overlap         Switch display window layout\r\n"
+        "  :gc  | :mem             Run GC and display memory stats\r\n"
         "tt> ");
       return;
     }
-    if (verb == ":ls" || verb == ":docs") {
-      std::string dir = (verb == ":docs") ? "/sd/docs" : (arg.empty() ? "/sd" : arg);
+    if (verb == ":ls" || verb == ":docs" || verb == ":states") {
+      std::string dir = (verb == ":docs") ? "/sd/docs"
+                      : ((verb == ":states") ? "/sd/worlds" : (arg.empty() ? "/sd" : arg));
       std::vector<std::pair<std::string, uint32_t>> files;
       vm.listVfsFiles(dir.c_str(), files);
       std::sort(files.begin(), files.end());
@@ -138,6 +142,65 @@ void SerialRepl::processLine(const std::string& line) {
       putBuffer.clear();
       puttingFile = true;
       hal.serialPrint(".. send lines, end with :eof ..\r\n");
+      return;
+    }
+    if (verb == ":diff") {
+      std::string diff = serializeClassState(vm);
+      if (diff.empty()) {
+        hal.serialPrint("(all classes & methods match primordial prelude)\r\ntt> ");
+      } else {
+        hal.serialPrint(diff.c_str());
+        if (diff.back() != '\n') hal.serialPrint("\r\n");
+        hal.serialPrint("tt> ");
+      }
+      return;
+    }
+    if (verb == ":save") {
+      std::string resolved, err;
+      if (saveClassState(vm, arg.c_str(), &resolved, &err)) {
+        std::string m = "OK saved " + resolved + "\r\ntt> ";
+        hal.serialPrint(m.c_str());
+      } else {
+        std::string m = "ERR: " + err + "\r\ntt> ";
+        hal.serialPrint(m.c_str());
+      }
+      return;
+    }
+    if (verb == ":loadstate" || verb == ":reset") {
+      std::string targetArg, bakOpt;
+      if (verb == ":reset") {
+        bakOpt = arg;
+      } else {
+        size_t sp2 = arg.find(' ');
+        targetArg  = (sp2 == std::string::npos) ? arg : arg.substr(0, sp2);
+        bakOpt     = (sp2 == std::string::npos) ? ""  : trimWs(arg.substr(sp2 + 1));
+        if (targetArg.empty()) {
+          hal.serialPrint("ERR: Usage :loadstate <name> [backupName | -]\r\ntt> ");
+          return;
+        }
+      }
+      std::string vfsPath = targetArg.empty() ? "" : normalizeStatePath(targetArg);
+      std::string oldLog;
+      bool hasAutoLog = !vm.worldPath.empty() &&
+                        vm.readVfsFile(vm.worldPath.c_str(), oldLog) &&
+                        !oldLog.empty();
+      if (hasAutoLog && bakOpt.empty()) {
+        std::string sug = wm.nextAutoLogBackupName();
+        std::string cmdEx = (verb == ":reset") ? ":reset" : (":loadstate " + targetArg);
+        std::string ask = "Auto-log w_main.tt exists! Run '" + cmdEx + " " + sug +
+                          "' to rename first, or '" + cmdEx + " -' to clear without backup.\r\ntt> ";
+        hal.serialPrint(ask.c_str());
+        return;
+      }
+      std::string renameTo = (bakOpt == "-") ? "" : bakOpt;
+      std::string status;
+      if (wm.performLoadClassState(vfsPath, renameTo, &status)) {
+        std::string m = "OK: " + status + "\r\ntt> ";
+        hal.serialPrint(m.c_str());
+      } else {
+        std::string m = "ERR: " + status + "\r\ntt> ";
+        hal.serialPrint(m.c_str());
+      }
       return;
     }
     if (verb == ":load") {

@@ -300,6 +300,122 @@ static void testGenericDocumentFileOutFileIn(VM& vm, HalMock& hal, WindowManager
   std::printf("[PASS] Generic JSON + RLE-Bmp Document fileOut:/fileIn: (/sd/docs/*.doc)\n");
 }
 
+static void testClassStateSaveLoadAndAutoLog(VM& vm, HalMock& hal, WindowManager& wm) {
+  // 1. Reset to clean Primordial Prelude first and verify diff is empty!
+  CHECK(wm.performLoadClassState("", ""));
+  CHECK(serializeClassState(vm).empty());
+  std::string emptyLog;
+  CHECK(!vm.readVfsFile("/sd/worlds/w_main.tt", emptyLog));
+
+  // 2. Add a new subclass + vars + instance method + class method, and override a prelude method
+  {
+    Oop tmp = vm.newUsr(CLS_TMP);
+    TempRootGuard rg(vm, tmp);
+    vm.evalCode(tmp,
+      "App defSub: 'OrbitApp'. "
+      "OrbitApp defVars: 'radius speed'. "
+      "OrbitApp def: 'step' c: 'radius = radius + speed'. "
+      "OrbitAppCls def: 'tag' c: '''orbit-v1'''. "
+      "TurtleApp def: 'title' c: '''Turtle-CP1'''");
+  }
+
+  // Verify w_main.tt auto-logged the changes!
+  std::string liveLog;
+  CHECK(vm.readVfsFile("/sd/worlds/w_main.tt", liveLog) && !liveLog.empty());
+
+  // Verify delta contains ONLY non-primordial cls/vars/meth (and no auto-accessor clutter!)
+  std::string diff = serializeClassState(vm);
+  CHECK(diff.find("cls OrbitApp App") != std::string::npos);
+  CHECK(diff.find("vars OrbitApp\n radius speed") != std::string::npos);
+  CHECK(diff.find("meth OrbitApp step") != std::string::npos);
+  CHECK(diff.find("meth OrbitAppCls tag") != std::string::npos);
+  CHECK(diff.find("meth TurtleApp title") != std::string::npos);
+  CHECK(diff.find("meth OrbitApp radius\n") == std::string::npos);
+  CHECK(diff.find("cls PaintApp") == std::string::npos);
+
+  // 3. Save Class State savepoint `cp1` independently of w_main.tt
+  std::string resolved, err;
+  CHECK(saveClassState(vm, "cp1", &resolved, &err));
+  CHECK(resolved == "/sd/worlds/cp1.tt");
+  std::string liveLogAfterSave;
+  CHECK(vm.readVfsFile("/sd/worlds/w_main.tt", liveLogAfterSave));
+  CHECK(liveLogAfterSave == liveLog);
+
+  // 4. Mess up the image (add junk class, corrupt OrbitApp>>step & TurtleApp>>title)
+  {
+    Oop tmp = vm.newUsr(CLS_TMP);
+    TempRootGuard rg(vm, tmp);
+    vm.evalCode(tmp,
+      "App defSub: 'BrokenApp'. "
+      "OrbitApp def: 'step' c: '1 / 0'. "
+      "TurtleApp def: 'title' c: '''BROKEN'''");
+  }
+  CHECK(!isNil(vm.dictGet(vm.globalsDict, makeSym(vm.internSym("brokenapp")))));
+
+  // 5. Request loading savepoint `cp1.tt`: modal must ask whether to rename w_main.tt first!
+  wm.requestLoadClassState("/sd/worlds/cp1.tt");
+  CHECK(wm.modalActive);
+  CHECK(wm.modalButtons.size() == 3);
+  wm.render();
+
+  // Tap Button 0 ("Yes: Rename w_main.tt First...") inside modal at (100, 42 + 36 + 10)
+  hal.pushTap(100, 88);
+  while (!hal.touchQueue.empty()) wm.tick();
+  CHECK(!wm.modalActive);
+  CHECK(wm.keyboard->active);
+  CHECK(wm.keyboard->text == "w_bak_1");
+
+  // Accept pre-filled `w_bak_1` by tapping Keyboard [OK] at (290, 7)
+  hal.pushTap(290, 7);
+  while (!hal.touchQueue.empty()) wm.tick();
+  CHECK(!wm.keyboard->active);
+
+  // Verify old broken auto-log was backed up to `/sd/worlds/w_bak_1.tt`!
+  std::string bakContent;
+  CHECK(vm.readVfsFile("/sd/worlds/w_bak_1.tt", bakContent));
+  CHECK(bakContent.find("BrokenApp") != std::string::npos);
+
+  // Verify VM cleanly reverted to `cp1.tt`: BrokenApp is gone, OrbitApp & TurtleApp match cp1!
+  CHECK(isNil(vm.dictGet(vm.globalsDict, makeSym(vm.internSym("brokenapp")))));
+  {
+    Oop tmp = vm.newUsr(CLS_TMP);
+    TempRootGuard rg(vm, tmp);
+    Oop r = vm.evalCode(tmp,
+      "o = OrbitApp new. o radius: 10. o speed: 3. o step. "
+      "LIST(o radius str, OrbitApp tag, TurtleApp new title) join: '|'");
+    CHECK(vm.toStdString(r) == "13|orbit-v1|Turtle-CP1");
+  }
+
+  // 6. Simulate CYD reboot (Prelude + replay `/sd/worlds/w_main.tt`): cp1 state survives boot!
+  std::string seededLog;
+  CHECK(vm.readVfsFile("/sd/worlds/w_main.tt", seededLog) && !seededLog.empty());
+  CHECK(seededLog.find("BrokenApp") == std::string::npos);
+  wm.closeAllWindows(false);
+  CHECK(vm.resetToPrelude(&err));
+  installGraphicsPrimitives(vm, &hal, &wm);
+  vm.markPrimordialState();
+  CHECK(loadWorldBuffer(vm, "main", seededLog.data(), seededLog.size(), false, &err));
+  wm.initDesktop();
+  {
+    Oop tmp = vm.newUsr(CLS_TMP);
+    TempRootGuard rg(vm, tmp);
+    CHECK(asInt30(vm.evalCode(tmp, "o = OrbitApp new. o radius: 20. o speed: 5. o step. o radius")) == 25);
+  }
+
+  // 7. Reset to Primordial Prelude (discarding w_main.tt) -> clean factory state!
+  CHECK(wm.performLoadClassState("", ""));
+  CHECK(isNil(vm.dictGet(vm.globalsDict, makeSym(vm.internSym("orbitapp")))));
+  CHECK(serializeClassState(vm).empty());
+  {
+    Oop tmp = vm.newUsr(CLS_TMP);
+    TempRootGuard rg(vm, tmp);
+    CHECK(vm.toStdString(vm.evalCode(tmp, "TurtleApp new title")) == "Turtle Fractals");
+  }
+
+  gUiPassed++;
+  std::printf("[PASS] Class-State Savepoints, w_main.tt Rename/Clear Modal & Reboot Replay\n");
+}
+
 int main() {
   std::printf("=== TerseTalk-CYD Headless UI & Graphics Test Suite ===\n");
   HalMock hal;
@@ -314,6 +430,7 @@ int main() {
   testMaximizedAppsAndScreenshots(vm, hal, wm);
   testGraffitiKeyboardBrowserAndSerial(vm, hal, wm);
   testGenericDocumentFileOutFileIn(vm, hal, wm);
+  testClassStateSaveLoadAndAutoLog(vm, hal, wm);
 
   vm.destroy();
   std::printf("=== ALL %d UI & GRAPHICS TEST SUITES PASSED ===\n", gUiPassed);

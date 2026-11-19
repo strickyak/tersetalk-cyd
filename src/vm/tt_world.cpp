@@ -1,5 +1,6 @@
 #include "tt_world.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <cstring>
@@ -104,6 +105,9 @@ bool loadWorldBuffer(VM& vm, const char* worldTag, const char* buf, size_t len,
           break;
         }
       }
+      while (!more.empty() && more.back() == '\n') {
+        more.pop_back();
+      }
       (void)borrowStaticSource;
 
       if (cmd == "stop") {
@@ -181,6 +185,148 @@ bool loadWorldFile(VM& vm, const char* worldTag, const char* vfsPath, std::strin
     return false;
   }
   return loadWorldBuffer(vm, worldTag, content.data(), content.size(), false, outErr);
+}
+
+std::string normalizeStatePath(const std::string& nameOrPath) {
+  std::string s = nameOrPath;
+  while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) s.erase(s.begin());
+  while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) s.pop_back();
+  if (s.empty()) return "";
+  if (s.find('/') == std::string::npos) {
+    s = "/sd/worlds/" + s;
+  }
+  if (s.size() < 3 || s.substr(s.size() - 3) != ".tt") {
+    s += ".tt";
+  }
+  return s;
+}
+
+static void appendIndentedBody(std::string& out, const char* body, size_t len) {
+  size_t pos = 0;
+  while (pos < len) {
+    size_t nl = pos;
+    while (nl < len && body[nl] != '\n') nl++;
+    size_t lineLen = nl - pos;
+    if (lineLen > 0 && body[pos + lineLen - 1] == '\r') lineLen--;
+    out.push_back(' ');
+    out.append(body + pos, lineLen);
+    out.push_back('\n');
+    pos = (nl < len) ? (nl + 1) : len;
+  }
+}
+
+std::string serializeClassState(VM& vm) {
+  std::string out;
+
+  // Build topological superclass-first order over all classes `1 .. vm.classCount`
+  std::vector<uint8_t> visited(vm.classCount + 1u, 0);
+  std::vector<uint16_t> topoOrder;
+  topoOrder.reserve(vm.classCount);
+
+  auto visitCls = [&](auto& selfRef, uint16_t cid) -> void {
+    if (cid == 0 || cid > vm.classCount || visited[cid]) return;
+    visited[cid] = 1;
+    ObjCls* c = vm.clsById(cid);
+    if (!c) return;
+    if (c->superClsId != 0 && c->superClsId <= vm.classCount) {
+      selfRef(selfRef, c->superClsId);
+    }
+    topoOrder.push_back(cid);
+  };
+  for (uint16_t cid = 1; cid <= vm.classCount; cid++) {
+    visitCls(visitCls, cid);
+  }
+
+  // 1. Non-primordial instance classes (`cls <Sub> <Super>`)
+  for (uint16_t cid : topoOrder) {
+    ObjCls* c = vm.clsById(cid);
+    if (!c || c->isPrimordial) continue;
+    // Skip metaclasses (`*Cls`), which `defineClass` creates automatically alongside `Foo`
+    if (c->hdr.clsId == CLS_METACLS) continue;
+    ObjCls* sup = vm.clsById(c->superClsId);
+    std::string cname   = vm.toStdString(c->nameStr);
+    std::string supName = sup ? vm.toStdString(sup->nameStr) : "Usr";
+    out += "cls " + cname + " " + supName + "\n\n";
+  }
+
+  // 2. Modified/added instance variables (`vars <ClassName>`)
+  for (uint16_t cid : topoOrder) {
+    ObjCls* c = vm.clsById(cid);
+    if (!c || !c->varsModified) continue;
+    if (!c->isPrimordial && c->myVarCount == 0) continue;
+
+    std::string cname = vm.toStdString(c->nameStr);
+    std::string vline;
+    if (isObj(c->myVarsList)) {
+      auto* vl = reinterpret_cast<ObjList*>(objFromOop(c->myVarsList));
+      for (uint32_t i = 0; i < vl->len; i++) {
+        if (i > 0) vline.push_back(' ');
+        vline += vm.toStdString(vl->items[i]);
+      }
+    }
+    out += "vars " + cname + "\n";
+    out += " " + vline + "\n\n";
+  }
+
+  // 3. Non-primordial user methods (`meth <ClassName> <selector>`) on both classes & metaclasses
+  for (uint16_t cid = 1; cid <= vm.classCount; cid++) {
+    ObjCls* c = vm.clsById(cid);
+    if (!c || !isObj(c->methDict)) continue;
+
+    std::vector<std::pair<std::string, ObjMeth*>> entries;
+    auto* md = reinterpret_cast<ObjDict*>(objFromOop(c->methDict));
+    for (uint32_t j = 0; j < md->cap; j++) {
+      Oop k = md->entries[j].key;
+      if (k == kOopNull || k == kOopSuper) continue;
+      Oop v = md->entries[j].val;
+      if (!isObj(v) || objFromOop(v)->format != OBJ_METH) continue;
+      auto* m = reinterpret_cast<ObjMeth*>(objFromOop(v));
+      if (m->isPrim || m->isPrimordial || m->isAutoAccessor) continue;
+      entries.emplace_back(vm.toStdString(k), m);
+    }
+    if (entries.empty()) continue;
+
+    std::sort(entries.begin(), entries.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+
+    std::string cname = vm.toStdString(c->nameStr);
+    for (const auto& kv : entries) {
+      out += "meth " + cname + " " + kv.first + "\n";
+      if (kv.second->source && kv.second->sourceLen > 0) {
+        appendIndentedBody(out, kv.second->source, kv.second->sourceLen);
+      } else {
+        out += " me\n";
+      }
+      out.push_back('\n');
+    }
+  }
+
+  return out;
+}
+
+bool saveClassState(VM& vm, const char* nameOrPath,
+                    std::string* outResolvedPath, std::string* outErr) {
+  std::string path = normalizeStatePath(nameOrPath ? nameOrPath : "");
+  if (path.empty()) {
+    if (outErr) *outErr = "Class state name cannot be empty";
+    return false;
+  }
+  if (path == vm.worldPath || path == "/sd/worlds/w_main.tt") {
+    if (outErr) *outErr = "Choose a savepoint name other than w_main";
+    return false;
+  }
+  if (path.rfind("/flash/", 0) == 0 || path == "/flash") {
+    if (outErr) *outErr = "/flash is immutable; save to /sd/worlds";
+    return false;
+  }
+
+  std::string body = "# TerseTalk-CYD Class State\n\n" + serializeClassState(vm);
+  if (!vm.writeVfsFile(path.c_str(), body.data(), body.size(), false)) {
+    if (outErr) *outErr = "Failed writing " + path;
+    return false;
+  }
+  if (outResolvedPath) *outResolvedPath = path;
+  return true;
 }
 
 }  // namespace tt

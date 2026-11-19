@@ -186,6 +186,10 @@ struct VM {
 
   // Lifecycle
   bool init(uint32_t arenaBytes = kDefaultArenaBytes, bool loadBuiltinPrelude = true);
+  void bootstrapCore();
+  void markPrimordialState();
+  bool resetToPrelude(std::string* outErr = nullptr);
+  void releaseHeapContents();
   void destroy();
 
   // Symbols

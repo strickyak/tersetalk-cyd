@@ -51,12 +51,37 @@ void setup() {
       gHal.drawTextClipped(4, 4, 312, ("Prelude err: " + err).c_str(), tt::Color::kOrange);
     }
   }
+  gVm->markPrimordialState();
 
-  // 2. Replay mutable user world log from MicroSD (/sd/worlds/w_main.tt) if present
-  if (gHal.isSdMounted()) {
+  // 2. Check Center-Screen Rescue Touch during boot:
+  //    If the stylus/pen is held down in the center of the screen, skip replaying w_main.tt!
+  int centerHits = 0;
+  for (int i = 0; i < 8; i++) {
+    int16_t tx = 0, ty = 0;
+    if (gHal.pollTouch(tx, ty)) {
+      if (tx >= 70 && tx <= 250 && ty >= 45 && ty <= 195) {
+        centerHits++;
+      }
+    }
+    delay(10);
+  }
+  bool rescueBoot = (centerHits >= 2);
+  std::string replayErr;
+
+  if (rescueBoot) {
+    gHal.setRgbLed(true, true, false);
+    gHal.drawText(34, 114, "RESCUE MODE: skipping w_main.tt...", tt::Color::kAccent);
+    for (int w = 0; w < 40; w++) {
+      int16_t rx = 0, ry = 0;
+      if (!gHal.pollTouch(rx, ry)) break;
+      delay(20);
+    }
+    gHal.setRgbLed(false, false, false);
+  } else if (gHal.isSdMounted()) {
+    // Normal boot: replay mutable auto-log from MicroSD (/sd/worlds/w_main.tt) if present
     std::string probe;
-    if (gVm->readVfsFile("/sd/worlds/w_main.tt", probe)) {
-      tt::loadWorldBuffer(*gVm, "main", probe.data(), probe.size(), false, &err);
+    if (gVm->readVfsFile("/sd/worlds/w_main.tt", probe) && !probe.empty()) {
+      tt::loadWorldBuffer(*gVm, "main", probe.data(), probe.size(), false, &replayErr);
     }
   }
 
@@ -64,6 +89,12 @@ void setup() {
   gRepl = new tt::SerialRepl(*gVm, gHal, *gWm);
 
   gWm->initDesktop();
+  if (rescueBoot) {
+    gWm->showBanner("RESCUE BOOT: skipped w_main.tt", 8000);
+    gHal.serialPrint("[RESCUE BOOT] Center touch held: skipped /sd/worlds/w_main.tt\r\n");
+  } else if (!replayErr.empty()) {
+    gWm->showBanner("w_main err: " + replayErr, 6000);
+  }
   gWm->render();
   gRepl->printBanner();
 }
