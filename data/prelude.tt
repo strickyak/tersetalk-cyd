@@ -68,25 +68,47 @@ meth Usr nonMain
  me
 
 # ===========================================================================
-# Windowed App Framework (`App`)
-#   Current App = owning App of topmost window; populates NE Wedge Dropdown!
+# Windowed App & Generic Document Framework (`App`)
+#   - Current App = owning App of topmost window; populates NE Wedge Dropdown.
+#   - Generic File-Out / File-In to `/sd/docs/<name>.doc` (JSON + RLE Bmp).
 # ===========================================================================
 cls App Usr
 
 vars App
- myWin
+ myWin docName
 
 meth AppCls open
  app = me new init.
- w = Win open: app title: (app title).
+ w = Win open: app title: (app docTitle).
  app myWin: w $ onStart.
  w
+
+meth AppCls fileIn:
+ p = a trim.
+ IF((p starts: '/') not) THEN(p = '/sd/docs/' + p).
+ IF((p ends: '.doc') not) THEN(p = p + '.doc').
+ env = (File read: p) fromJson.
+ cname = env at: 'cls'.
+ targetCls = Cls at: cname.
+ IF(targetCls is: nil) THEN(('Unknown App class: ' + cname) err).
+ app = targetCls new init.
+ app docName: (env at: 'doc').
+ w = Win open: app title: (app docTitle).
+ app myWin: w $ onStart.
+ app loadDocState: (env at: 'state').
+ w
+
+meth AppCls openDoc:
+ me fileIn: a
 
 meth App init
  me
 
 meth App title
  me cls name
+
+meth App docTitle
+ IF(docName) THEN((me title) + ': ' + docName) ELSE(me title)
 
 meth App onStart
  me
@@ -109,6 +131,61 @@ meth App appMenu
 meth App dirty
  IF(myWin) THEN(myWin dirty).
  me
+
+# --- Generic Document Marshalling & `/sd/docs/*.doc` Persistence ---
+meth App canSaveDoc
+ 1
+
+meth App transientVars
+ 'mywin docname bpen prevpt dirtyfractal nxt'
+
+meth App onDocLoad
+ me dirty
+
+meth App docState
+ raw = me peekVars.
+ skip = (me transientVars low) words.
+ out = Dict new.
+ FOR(k: v: raw) DO(
+  IF((skip has: k) not) THEN(
+   IF(v isa: Bmp) THEN(out at: k put: (v pack)) ELSE(out at: k put: v))).
+ out
+
+meth App loadDocState:
+ IF(a isa: Dict) THEN(
+  clean = Dict new.
+  FOR(k: v: a) DO(
+   IF(AND(v isa: Dict; (v at: '__bmp') == 1)) THEN(
+    clean at: k put: (Bmp unpack: v))
+   ELSE(
+    clean at: k put: v)).
+  me pokeVars: clean).
+ me onDocLoad
+
+meth App cleanDocName:
+ s = a trim.
+ IF(s starts: '/sd/docs/') THEN(s = s cut: 9 to: (s len)).
+ IF(s ends: '.doc') THEN(s = s cut: 0 to: (s len - 4)).
+ s
+
+meth App fileOut:
+ nm = me cleanDocName: a.
+ IF(nm == '') THEN('Empty document name' err).
+ docName = nm.
+ path = '/sd/docs/' + nm + '.doc'.
+ env = DICT('cls', me cls name; 'doc', nm; 'state', me docState).
+ File write: path value: (Json en: env).
+ IF(myWin) THEN(myWin title: me docTitle).
+ Win banner: 'Saved ' + nm + '.doc'.
+ path
+
+meth App saveDoc
+ IF(docName) THEN(me fileOut: docName) ELSE(me saveDocPrompt)
+
+meth App saveDocPrompt
+ dflt = MAYBE(docName) NULL(me cls name low).
+ Win prompt: 'Save Doc (/sd/docs/*.doc):' init: dflt then: FN(nm:
+  IF(nm trim) THEN(me fileOut: nm))
 
 # ===========================================================================
 # 1. GraphApp: Interactive Function Plotter (`y = f(x)`)
@@ -206,6 +283,10 @@ meth SpiroApp init
  spinning = 0.
  presetIdx = 0.
  me
+
+meth SpiroApp onDocLoad
+ IF(myWin) THEN(myWin every: (IF(spinning) THEN(75) ELSE(0))).
+ me dirty
 
 meth SpiroApp onPaint:
  p = a.
@@ -361,7 +442,7 @@ meth TurtleApp appMenu
  )
 
 # ===========================================================================
-# 4. MandelApp: Tap-to-Zoom Mandelbrot Set Explorer (on 8-Bit Bmp)
+# 4. MandelApp: Tap-to-Zoom Mandelbrot Set Explorer (saves coords, not pixels!)
 # ===========================================================================
 cls MandelApp App
 
@@ -371,6 +452,9 @@ vars MandelApp
 meth MandelApp title
  'Mandelbrot'
 
+meth MandelApp transientVars
+ 'mywin docname pixbuf dirtyfractal'
+
 meth MandelApp init
  pixBuf = Bmp wid: 96 hei: 72.
  cx = -0.6.
@@ -379,6 +463,10 @@ meth MandelApp init
  maxIter = 48.
  dirtyFractal = 1.
  me
+
+meth MandelApp onDocLoad
+ dirtyFractal = 1.
+ me dirty
 
 meth MandelApp recompute
  sy = span * (pixBuf hei) / (pixBuf wid).
@@ -454,8 +542,13 @@ meth LifeApp init
  me randomize
 
 meth LifeApp onStart
- IF(myWin) THEN(myWin every: 90).
+ IF(myWin) THEN(myWin every: (IF(running) THEN(90) ELSE(0))).
  me
+
+meth LifeApp onDocLoad
+ IF(cur) THEN(nxt = Bmp wid: (cur wid) hei: (cur hei)).
+ IF(myWin) THEN(myWin every: (IF(running) THEN(90) ELSE(0))).
+ me dirty
 
 meth LifeApp randomize
  cur clear.
@@ -483,8 +576,8 @@ meth LifeApp onTouch:at:
  IF(OR(a == 'down'; a == 'move')) THEN(
   w = (myWin wid) max: 1.
   h = (myWin hei) max: 1.
-  gx = ((b x) * 64 / w) int.
-  gy = ((b y) * 48 / h) int.
+  gx = ((b x) * (cur wid) / w) int.
+  gy = ((b y) * (cur hei) / h) int.
   cur at: gx y: gy put: 64.
   cur at: (gx + 1) y: gy put: 64.
   me dirty)
@@ -516,7 +609,7 @@ meth LifeApp appMenu
  )
 
 # ===========================================================================
-# 6. PaintApp: Stylus & Kaleidoscope Symmetry Sketchpad
+# 6. PaintApp: Stylus & Kaleidoscope Symmetry Sketchpad (saves Bmp via RLE!)
 # ===========================================================================
 cls PaintApp App
 
@@ -535,6 +628,11 @@ meth PaintApp init
  mirror = 1.
  prevPt = nil.
  me
+
+meth PaintApp onDocLoad
+ bpen = canvas pen.
+ prevPt = nil.
+ me dirty
 
 meth PaintApp onPaint:
  p = a.
@@ -585,6 +683,124 @@ meth PaintApp appMenu
  )
 
 # ===========================================================================
+# 7. PadApp: Live Graphics Scratchpad App (savable code document!)
+# ===========================================================================
+cls PadApp App
+
+vars PadApp
+ code
+
+meth PadApp title
+ 'Graphics Pad'
+
+meth PadApp init
+ me presetWaves.
+ me
+
+meth PadApp onPaint:
+ p = a.
+ TRY(Tmp new eval: 'p = a. ' + code arg: p) CATCH(e:
+  p screenCoords $ color: 500 $ box: 0 @ (p hei - 24) size: (p wid) @ 11.
+  p white text: e at: 3 @ (p hei - 22)).
+ by = p hei - 13.
+ IF(by > 8) THEN(
+  p screenCoords $ color: 112 $ box: 0 @ by size: (p wid) @ 13.
+  p color: 045 $ rbox: 2 @ (by + 2) size: 30 @ 10 r: 2.
+  p yellow text: 'Edit' at: 5 @ (by + 3).
+  oneLine = code replace: (10 chr) with: ' '.
+  p cyan text: oneLine at: 36 @ (by + 3))
+
+meth PadApp editCode
+ Win promptMulti: 'Graphics Pad (p = Pen)' init: code then: FN(s:
+  code = s.
+  me dirty)
+
+meth PadApp onTouch:at:
+ IF(AND(a == 'down'; (b y) >= ((myWin hei) - 14))) THEN(me editCode)
+
+meth PadApp presetWaves
+ code = 'p clear: 001 $ world: -6.3 @ -1.6 to: 6.3 @ 1.6 $ axes.
+ p yellow plot: FN(x: x sin).
+ p cyan plot: FN(x: (x * 3) cos * 0.6)'.
+ me dirty
+
+meth PadApp presetRose
+ code = 'p clear $ world: -1.2 @ -1.2 to: 1.2 @ 1.2 $ axes.
+ p magenta param: FN(t: r = (t * 5) cos. (r * t cos) @ (r * t sin)) from: 0 to: Num tau steps: 240'.
+ me dirty
+
+meth PadApp presetRings
+ code = 'p clear. c = (p wid / 2) @ (p hei / 2).
+ FOR(i: 36) DO(p hue: i * 10 $ circ: c r: i * 3 + 4)'.
+ me dirty
+
+meth PadApp presetLissajous
+ code = 'p clear: 001 $ world: -1.2 @ -1.2 to: 1.2 @ 1.2 $ axes.
+ p green param: FN(t: (t * 3) sin @ (t * 4) cos) from: 0 to: Num tau steps: 240'.
+ me dirty
+
+meth PadApp appMenu
+ LIST(
+  'Edit Pad Code...'  @ 'editCode';
+  'Preset: Waves'     @ 'presetWaves';
+  'Preset: Polar Rose'@ 'presetRose';
+  'Preset: Rings'     @ 'presetRings';
+  'Preset: Lissajous' @ 'presetLissajous'
+ )
+
+# ===========================================================================
+# 8. NoteApp: Text Document Pad (savable text document!)
+# ===========================================================================
+cls NoteApp App
+
+vars NoteApp
+ body
+
+meth NoteApp title
+ 'Note Pad'
+
+meth NoteApp init
+ body = 'TerseTalk Notes
+ Tap Edit or NE menu to write text.
+ Use Save Doc As... to store on /sd/docs!'.
+ me
+
+meth NoteApp onPaint:
+ p = a.
+ p clear: 111.
+ p color: 023 $ box: 0 @ 0 size: (p wid) @ 14.
+ p color: 045 $ rbox: 3 @ 2 size: 32 @ 10 r: 2.
+ p yellow text: 'Edit' at: 6 @ 3.
+ p cyan text: (me docTitle) at: 40 @ 3.
+ maxCols = ((p wid - 8) / 6) max: 8.
+ y = 18.
+ FOR(ln: body lines) DO(
+  pos = 0.
+  IF(ln len == 0) THEN(y = y + 10) ELSE(
+   WHILE(AND(pos < (ln len); y < (p hei - 8))) DO(
+    seg = ln cut: pos len: maxCols.
+    p white text: seg at: 4 @ y.
+    y = y + 10.
+    pos = pos + maxCols)))
+
+meth NoteApp editBody
+ Win promptMulti: 'Edit Note Text' init: body then: FN(s:
+  body = s.
+  me dirty)
+
+meth NoteApp onTouch:at:
+ IF(AND(a == 'down'; (b y) <= 16)) THEN(me editBody)
+
+meth NoteApp appMenu
+ LIST(
+  'Edit Text...' @ 'editBody';
+  'Clear Text'   @ 'clearBody'
+ )
+
+meth NoteApp clearBody
+ body = ''. me dirty
+
+# ===========================================================================
 # Boot Self-Tests
 # ===========================================================================
 equals 42
@@ -594,7 +810,7 @@ equals 'hello world'
  x = 'world'. 'hello [x]'
 
 equals 10 @ 20 @ 30
- (1 @ 2 @ 3) map: FN(x: x * 10)
+ (1 to: 3) map: FN(x: x * 10)
 
 equals 55
  (1 to: 10) sum

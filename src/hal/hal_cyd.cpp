@@ -103,6 +103,7 @@ bool HalCyd::init() {
   sdOk = SD.begin(kPinSdCs, sdSpi, 16000000u);
   if (sdOk) {
     if (!SD.exists("/worlds")) SD.mkdir("/worlds");
+    if (!SD.exists("/docs"))   SD.mkdir("/docs");
   }
 
   resetClipRect();

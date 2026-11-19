@@ -50,7 +50,7 @@ static void testDesktopAndOverlappingWindows(VM& vm, HalMock& hal, WindowManager
 
   // Tap item 1 ("Fourier Square") in the NE dropdown!
   int16_t item1X = static_cast<int16_t>(wm.menuX + 20);
-  int16_t item1Y = static_cast<int16_t>(wm.menuY + 2 + 1 * 14 + 6);
+  int16_t item1Y = static_cast<int16_t>(wm.menuY + 2 + 1 * 12 + 5);
   hal.pushTap(item1X, item1Y);
   while (!hal.touchQueue.empty()) wm.tick();
   CHECK(wm.activeMenu == 0);
@@ -212,6 +212,94 @@ static void testGraffitiKeyboardBrowserAndSerial(VM& vm, HalMock& hal, WindowMan
   std::printf("[PASS] Palm Graffiti, Stylus Keyboard, Class Browser, Serial REPL & Zero Bmp Leak\n");
 }
 
+static void testGenericDocumentFileOutFileIn(VM& vm, HalMock& hal, WindowManager& wm) {
+  // 1. GraphApp equation document round-trip (`/sd/docs/mywave.doc`)
+  Window* gw = wm.launchTerseAppByClassName("GraphApp");
+  CHECK(gw != nullptr);
+  Oop gApp = gw->appObj;
+  {
+    TempRootGuard rg(vm, gApp);
+    vm.evalCode(gApp, "expr = 'x cos * 2'. expr2 = nil. span = 3.14. me fileOut: 'mywave'");
+  }
+  CHECK(gw->title == "Graph Plotter: mywave");
+  CHECK(hal.vfsFiles.find("/sd/docs/mywave.doc") != hal.vfsFiles.end());
+
+  // Close all windows, then file back in via `App fileIn: 'mywave'`!
+  while (wm.zCount > 0) wm.closeWindowSlot(wm.zOrder[wm.zCount - 1]);
+  {
+    Oop tmp = vm.newUsr(CLS_TMP);
+    TempRootGuard rg(vm, tmp);
+    vm.evalCode(tmp, "App fileIn: 'mywave'");
+  }
+  Window* gw2 = wm.topWindow();
+  CHECK(gw2 != nullptr && gw2->title == "Graph Plotter: mywave");
+  {
+    TempRootGuard rg(vm, gw2->appObj);
+    Oop exprOop = vm.evalCode(gw2->appObj, "expr");
+    CHECK(vm.toStdString(exprOop) == "x cos * 2");
+  }
+  // Verify NE App Menu automatically includes `Save (mywave)` & `Save Doc As...`!
+  hal.pushTap(312, 6);
+  while (!hal.touchQueue.empty()) wm.tick();
+  bool hasQuickSave = false;
+  for (const auto& it : wm.menuItems) {
+    if (it.label == "Save (mywave)") hasQuickSave = true;
+  }
+  CHECK(hasQuickSave);
+  hal.pushTap(280, 220);
+  while (!hal.touchQueue.empty()) wm.tick();
+
+  // 2. PaintApp 160x112 Bmp RLE+Base64 document round-trip (`/sd/docs/kaleido.doc`)
+  Window* pw = wm.launchTerseAppByClassName("PaintApp");
+  CHECK(pw != nullptr);
+  // Simulate stylus stroke across canvas
+  hal.pushStroke({{100, 80}, {120, 95}, {145, 115}});
+  while (!hal.touchQueue.empty()) wm.tick();
+  {
+    TempRootGuard rg(vm, pw->appObj);
+    vm.evalCode(pw->appObj, "me fileOut: 'kaleido'");
+  }
+  auto docIt = hal.vfsFiles.find("/sd/docs/kaleido.doc");
+  CHECK(docIt != hal.vfsFiles.end());
+  // 17,920-pixel canvas compresses down to <2 KB JSON via RLE+Base64!
+  CHECK(docIt->second.size() < 2500u);
+
+  // Record a painted pixel, close all windows, and file back in!
+  Oop pxBefore = vm.evalCode(pw->appObj, "canvas at: (canvas wid / 2) y: (canvas hei / 2)");
+  (void)pxBefore;
+  int nonZeroBefore = asInt30(vm.evalCode(pw->appObj,
+    "n = 0. FOR(y: canvas hei) DO(FOR(x: canvas wid) DO(IF((canvas at: x y: y) > 0) THEN(n = n + 1))). n"));
+  CHECK(nonZeroBefore > 20);
+
+  while (wm.zCount > 0) wm.closeWindowSlot(wm.zOrder[wm.zCount - 1]);
+  {
+    Oop tmp = vm.newUsr(CLS_TMP);
+    TempRootGuard rg(vm, tmp);
+    vm.evalCode(tmp, "App fileIn: '/sd/docs/kaleido.doc'");
+  }
+  Window* pw2 = wm.topWindow();
+  CHECK(pw2 != nullptr && pw2->title == "Paint Pad: kaleido");
+  int nonZeroAfter = asInt30(vm.evalCode(pw2->appObj,
+    "n = 0. FOR(y: canvas hei) DO(FOR(x: canvas wid) DO(IF((canvas at: x y: y) > 0) THEN(n = n + 1))). n"));
+  CHECK(nonZeroAfter == nonZeroBefore);
+
+  // 3. NoteApp & PadApp document round-trip
+  Window* nw = wm.launchTerseAppByClassName("NoteApp");
+  CHECK(nw != nullptr);
+  vm.evalCode(nw->appObj, "body = 'Euler: e^(i*pi) + 1 = 0'. me fileOut: 'euler'");
+  while (wm.zCount > 0) wm.closeWindowSlot(wm.zOrder[wm.zCount - 1]);
+  {
+    Oop tmp = vm.newUsr(CLS_TMP);
+    TempRootGuard rg(vm, tmp);
+    vm.evalCode(tmp, "App fileIn: 'euler'");
+  }
+  CHECK(wm.topWindow() != nullptr && wm.topWindow()->title == "Note Pad: euler");
+  CHECK(vm.toStdString(vm.evalCode(wm.topWindow()->appObj, "body")) == "Euler: e^(i*pi) + 1 = 0");
+
+  gUiPassed++;
+  std::printf("[PASS] Generic JSON + RLE-Bmp Document fileOut:/fileIn: (/sd/docs/*.doc)\n");
+}
+
 int main() {
   std::printf("=== TerseTalk-CYD Headless UI & Graphics Test Suite ===\n");
   HalMock hal;
@@ -225,6 +313,7 @@ int main() {
   testDesktopAndOverlappingWindows(vm, hal, wm);
   testMaximizedAppsAndScreenshots(vm, hal, wm);
   testGraffitiKeyboardBrowserAndSerial(vm, hal, wm);
+  testGenericDocumentFileOutFileIn(vm, hal, wm);
 
   vm.destroy();
   std::printf("=== ALL %d UI & GRAPHICS TEST SUITES PASSED ===\n", gUiPassed);

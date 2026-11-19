@@ -486,31 +486,57 @@ class ClassBrowserController : public NativeWinController {
 };
 
 // ---------------------------------------------------------------------------
-// 4. Files Browser (`/sd` mutable & `/flash` immutable) (`FilesController`)
+// 4. Files & Documents Browser (`/sd/docs`, `/sd`, `/sd/worlds`, `/flash`)
 // ---------------------------------------------------------------------------
 class FilesController : public NativeWinController {
  public:
-  std::string currentDir = "/sd";
+  std::string currentDir = "/sd/docs";
   std::string previewName;
   std::string previewBody;
+  int16_t     openBtnY   = -1;
+
+  explicit FilesController(const char* initDir) {
+    if (initDir && initDir[0]) currentDir = initDir;
+  }
 
   const char* appName() const override { return "Files"; }
+
+  static bool isDocFile(const std::string& nm) {
+    return nm.size() > 4 && nm.substr(nm.size() - 4) == ".doc";
+  }
+
+  void openSelectedDoc(VM& vm, WindowManager& wm) {
+    if (previewName.empty()) return;
+    std::string full = currentDir + "/" + previewName;
+    Oop pStr = vm.newStr(full.data(), full.size());
+    TempRootGuard rg(vm, pStr);
+    Oop tmp = vm.newUsr(CLS_TMP);
+    rg.push(tmp);
+    try {
+      vm.ticksRemaining = 2000000;
+      vm.evalCode(tmp, "App fileIn: a", &pStr, 1);
+    } catch (const TerseError& e) {
+      wm.showBanner(e.message);
+    }
+  }
 
   void onPaint(VM& vm, DisplayHal& hal, Window&,
                int16_t cx, int16_t cy, int16_t cw, int16_t ch) override {
     hal.fillRect(cx, cy, cw, ch, Color::kWinBg);
+    openBtnY = -1;
 
-    // Tab strip: [/sd] [/sd/worlds] [/flash]
+    // Tab strip: [Docs] [/sd] [Worlds] [Flash]
     hal.fillRect(cx, cy, cw, 14, Color::kBarBg);
     hal.drawHLine(cx, cy + 14, cw, Color::kBorder);
-    auto drawTab = [&](int16_t tx, int16_t tw, const char* dir) {
+    auto drawTab = [&](int16_t tx, int16_t tw, const char* label, const char* dir) {
       bool act = (currentDir == dir);
       hal.fillRoundRect(tx, cy + 1, tw, 12, 2, act ? Color::kMenuSel : Color::kKeyBg);
-      hal.drawText(tx + 4, cy + 3, dir, act ? Color::kAccent : Color::kWhite);
+      hal.drawText(tx + 4, cy + 3, label, act ? Color::kAccent : Color::kWhite);
     };
-    drawTab(cx + 2,   34, "/sd");
-    drawTab(cx + 39,  70, "/sd/worlds");
-    drawTab(cx + 112, 46, "/flash");
+    drawTab(cx + 2,   34, "Docs",   "/sd/docs");
+    drawTab(cx + 39,  30, "/sd",    "/sd");
+    drawTab(cx + 72,  46, "Worlds", "/sd/worlds");
+    drawTab(cx + 121, 40, "Flash",  "/flash");
 
     std::vector<std::pair<std::string, uint32_t>> files;
     vm.listVfsFiles(currentDir.c_str(), files);
@@ -534,8 +560,13 @@ class FilesController : public NativeWinController {
     if (!previewName.empty() && ry + 14 < cy + ch) {
       hal.drawHLine(cx, ry + 1, cw, Color::kBorder);
       ry += 4;
-      hal.drawTextClipped(cx + 4, ry, cw - 8, previewName.c_str(), Color::kCyan);
-      ry += 10;
+      hal.drawTextClipped(cx + 4, ry, cw - 66, previewName.c_str(), Color::kCyan);
+      if (isDocFile(previewName)) {
+        openBtnY = static_cast<int16_t>(ry - cy - 2);
+        hal.fillRoundRect(cx + cw - 56, ry - 2, 52, 11, 2, 0x03E0);
+        hal.drawText(cx + cw - 52, ry, "Open Doc", Color::kWhite);
+      }
+      ry += 11;
       size_t p = 0;
       while (p < previewBody.size() && ry + 8 <= cy + ch) {
         size_t nl = previewBody.find('\n', p);
@@ -552,30 +583,47 @@ class FilesController : public NativeWinController {
   void onTouch(VM& vm, WindowManager& wm, Window& win,
                const char* kind, int16_t lx, int16_t ly) override {
     if (std::strcmp(kind, "down") != 0) return;
+    int16_t cx, cy, cw, ch;
+    wm.getClientRect(win, wm.topWindow() == &win, cx, cy, cw, ch);
+
     if (ly <= 14) {
-      if (lx < 38) currentDir = "/sd";
-      else if (lx < 110) currentDir = "/sd/worlds";
+      if (lx < 38) currentDir = "/sd/docs";
+      else if (lx < 71) currentDir = "/sd";
+      else if (lx < 120) currentDir = "/sd/worlds";
       else currentDir = "/flash";
       previewName.clear();
       previewBody.clear();
-      win.dirty = true; wm.invalidateAll();
+      wm.invalidateWindow(win);
       return;
     }
+
+    // Check [Open Doc] button tap in preview header!
+    if (openBtnY > 0 && ly >= openBtnY && ly <= openBtnY + 13 && lx >= cw - 58 && isDocFile(previewName)) {
+      openSelectedDoc(vm, wm);
+      return;
+    }
+
     int idx = (ly - 17) / 10;
     std::vector<std::pair<std::string, uint32_t>> files;
     vm.listVfsFiles(currentDir.c_str(), files);
     std::sort(files.begin(), files.end());
-    if (idx >= 0 && idx < static_cast<int>(files.size())) {
+    int maxListRows = previewName.empty() ? ((ch - 18) / 10) : 5;
+    if (idx >= 0 && idx < maxListRows && idx < static_cast<int>(files.size())) {
       previewName = files[idx].first;
       std::string full = currentDir + "/" + previewName;
       previewBody.clear();
       vm.readVfsFile(full.c_str(), previewBody);
-      win.dirty = true; wm.invalidateAll();
+      wm.invalidateWindow(win);
     }
   }
 
   void populateAppMenu(VM& vm, WindowManager& wm, Window& win,
                        std::vector<MenuItem>& out) override {
+    if (isDocFile(previewName)) {
+      out.push_back({"Open Selected Doc", "", [this, &vm, &wm]() {
+        openSelectedDoc(vm, wm);
+      }});
+    }
     out.push_back({"Run Selected Script", "", [this, &vm, &wm, &win]() {
       if (previewName.empty()) return;
       std::string full = currentDir + "/" + previewName;
@@ -590,7 +638,7 @@ class FilesController : public NativeWinController {
         } catch (const TerseError& e) {
           wm.showBanner(e.message);
         }
-        win.dirty = true; wm.invalidateAll();
+        wm.invalidateWindow(win);
       }
     }});
     out.push_back({"Load Selected World", "", [this, &vm, &wm, &win]() {
@@ -602,8 +650,19 @@ class FilesController : public NativeWinController {
       } else {
         wm.showBanner(err);
       }
-      win.dirty = true; wm.invalidateAll();
+      wm.invalidateWindow(win);
     }});
+    if (currentDir.rfind("/sd", 0) == 0 && !previewName.empty()) {
+      out.push_back({"Delete Selected File", "", [this, &vm, &wm, &win]() {
+        std::string full = currentDir + "/" + previewName;
+        if (vm.deleteVfsFile(full.c_str())) {
+          wm.showBanner("Deleted " + previewName);
+          previewName.clear();
+          previewBody.clear();
+        }
+        wm.invalidateWindow(win);
+      }});
+    }
   }
 };
 
@@ -618,8 +677,8 @@ NativeWinController* createWorkspaceController(const char* initialCode) {
 NativeWinController* createClassBrowserController(const char* focusClassName) {
   return new ClassBrowserController(focusClassName);
 }
-NativeWinController* createFilesController() {
-  return new FilesController();
+NativeWinController* createFilesController(const char* initialDir) {
+  return new FilesController(initialDir);
 }
 
 }  // namespace tt

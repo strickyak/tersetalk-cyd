@@ -2276,6 +2276,31 @@ static Oop primUsrClsFind(VM& vm, Oop rcvr, const Oop* args, uint8_t) {
 // ---------------------------------------------------------------------------
 // 9. Json & Hex Primitives
 // ---------------------------------------------------------------------------
+static void jsonAppendString(const std::string& s, std::string& out) {
+  out.push_back('"');
+  for (unsigned char c : s) {
+    switch (c) {
+      case '"':  out += "\\\""; break;
+      case '\\': out += "\\\\"; break;
+      case '\b': out += "\\b";  break;
+      case '\f': out += "\\f";  break;
+      case '\n': out += "\\n";  break;
+      case '\r': out += "\\r";  break;
+      case '\t': out += "\\t";  break;
+      default:
+        if (c < 0x20) {
+          char hex[8];
+          std::snprintf(hex, sizeof(hex), "\\u%04x", c);
+          out += hex;
+        } else {
+          out.push_back(static_cast<char>(c));
+        }
+        break;
+    }
+  }
+  out.push_back('"');
+}
+
 static void jsonEncodeRec(VM& vm, Oop v, std::string& out, int depth) {
   if (depth > 32 || isNil(v)) {
     out += "null";
@@ -2311,9 +2336,7 @@ static void jsonEncodeRec(VM& vm, Oop v, std::string& out, int depth) {
       out.push_back('{');
       for (size_t i = 0; i < keys.size(); i++) {
         if (i > 0) out.push_back(',');
-        std::string ks = vm.toStdString(keys[i]);
-        Oop kStr = vm.newStr(ks.data(), ks.size());
-        jsonEncodeRec(vm, kStr, out, depth + 1);
+        jsonAppendString(vm.toStdString(keys[i]), out);
         out.push_back(':');
         jsonEncodeRec(vm, vm.dictGet(v, keys[i]), out, depth + 1);
       }
@@ -2321,30 +2344,7 @@ static void jsonEncodeRec(VM& vm, Oop v, std::string& out, int depth) {
       return;
     }
   }
-  // Default: JSON string
-  std::string s = vm.toStdString(v);
-  out.push_back('"');
-  for (unsigned char c : s) {
-    switch (c) {
-      case '"':  out += "\\\""; break;
-      case '\\': out += "\\\\"; break;
-      case '\b': out += "\\b";  break;
-      case '\f': out += "\\f";  break;
-      case '\n': out += "\\n";  break;
-      case '\r': out += "\\r";  break;
-      case '\t': out += "\\t";  break;
-      default:
-        if (c < 0x20) {
-          char hex[8];
-          std::snprintf(hex, sizeof(hex), "\\u%04x", c);
-          out += hex;
-        } else {
-          out.push_back(static_cast<char>(c));
-        }
-        break;
-    }
-  }
-  out.push_back('"');
+  jsonAppendString(vm.toStdString(v), out);
 }
 
 struct JsonParser {

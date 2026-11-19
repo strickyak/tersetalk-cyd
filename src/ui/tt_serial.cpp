@@ -81,14 +81,16 @@ void SerialRepl::processLine(const std::string& line) {
         "  :cat <path>       Print file contents\r\n"
         "  :put <path>       Write lines into /sd/... until :eof\r\n"
         "  :load <path>      Load world definitions (.tt) file\r\n"
+        "  :docs             List saved documents in /sd/docs\r\n"
+        "  :doc <name>       Open a saved document on CYD display\r\n"
         "  :open <AppCls>    Launch App window on CYD display\r\n"
         "  :max | :overlap   Switch display window layout\r\n"
         "  :gc  | :mem       Run GC and display memory stats\r\n"
         "tt> ");
       return;
     }
-    if (verb == ":ls") {
-      std::string dir = arg.empty() ? "/sd" : arg;
+    if (verb == ":ls" || verb == ":docs") {
+      std::string dir = (verb == ":docs") ? "/sd/docs" : (arg.empty() ? "/sd" : arg);
       std::vector<std::pair<std::string, uint32_t>> files;
       vm.listVfsFiles(dir.c_str(), files);
       std::sort(files.begin(), files.end());
@@ -99,6 +101,21 @@ void SerialRepl::processLine(const std::string& line) {
         hal.serialPrint(row);
       }
       hal.serialPrint("tt> ");
+      return;
+    }
+    if (verb == ":doc") {
+      Oop pStr = vm.newStr(arg.data(), arg.size());
+      TempRootGuard rg(vm, pStr);
+      Oop tmp = vm.newUsr(CLS_TMP);
+      rg.push(tmp);
+      try {
+        vm.ticksRemaining = 2000000;
+        vm.evalCode(tmp, "App fileIn: a", &pStr, 1);
+        hal.serialPrint("OK opened doc.\r\ntt> ");
+      } catch (const TerseError& e) {
+        std::string m = "ERR: " + e.message + "\r\ntt> ";
+        hal.serialPrint(m.c_str());
+      }
       return;
     }
     if (verb == ":cat") {

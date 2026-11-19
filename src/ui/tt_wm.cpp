@@ -12,6 +12,7 @@ namespace tt {
 namespace {
 
 static int16_t gNextWinId = 1;
+static constexpr int16_t kMenuRowH = 12;
 
 }  // namespace
 
@@ -285,13 +286,13 @@ void WindowManager::buildGlobalMenu(std::vector<MenuItem>& out) {
     out.push_back({maximized ? "Overlap Windows" : "Maximize Top", "",
                    [this]() { toggleMaximized(); }});
   }
-  out.push_back({"+ Graphics Pad", "", [this]() {
+  out.push_back({"Open Doc (/sd/docs)","", [this]() {
     if (maximized) maximized = false;
-    int c = (zCount % 4) * 10;
-    createNativeWindow(createGraphicsPadController(), "Graphics Pad",
-                       static_cast<int16_t>(30 + c), static_cast<int16_t>(26 + c), 264, 192);
+    createNativeWindow(createFilesController("/sd/docs"), "Documents & Files", 18, 24, 284, 198);
   }});
-  out.push_back({"+ Workspace", "", [this]() {
+  out.push_back({"+ Graphics Pad",   "", [this]() { launchTerseAppByClassName("PadApp"); }});
+  out.push_back({"+ Note Pad",       "", [this]() { launchTerseAppByClassName("NoteApp"); }});
+  out.push_back({"+ Workspace",      "", [this]() {
     if (maximized) maximized = false;
     int c = (zCount % 4) * 10;
     createNativeWindow(createWorkspaceController(), "Workspace",
@@ -306,7 +307,7 @@ void WindowManager::buildGlobalMenu(std::vector<MenuItem>& out) {
   out.push_back({"Class Browser",    "", [this]() { openEditAppCodeBrowser(); }});
   out.push_back({"Files (/sd,/flash)","",[this]() {
     if (maximized) maximized = false;
-    createNativeWindow(createFilesController(), "Files", 24, 28, 272, 194);
+    createNativeWindow(createFilesController("/sd"), "Files", 24, 28, 272, 194);
   }});
   out.push_back({"Calibrate Touch",  "", [this]() {
     hal.runTouchCalibration();
@@ -322,7 +323,7 @@ void WindowManager::buildAppMenu(std::vector<MenuItem>& out) {
     return;
   }
 
-  // 1. Dynamic TerseTalk `currentApp appMenu` items!
+  // 1. Dynamic TerseTalk `currentApp appMenu` items + generic Document Save/Save As!
   if (isObj(top->appObj)) {
     uint32_t menuSym = vm.internSym("appmenu");
     if (vm.lookupMeth(vm.oopClsId(top->appObj), menuSym)) {
@@ -347,6 +348,27 @@ void WindowManager::buildAppMenu(std::vector<MenuItem>& out) {
         showBanner(e.message);
       }
     }
+
+    // Generic Document Save / Save As for any App where `canSaveDoc` is truthy!
+    uint32_t canSaveSym = vm.internSym("cansavedoc");
+    if (vm.lookupMeth(vm.oopClsId(top->appObj), canSaveSym)) {
+      try {
+        vm.ticksRemaining = 200000;
+        Oop ok = vm.send(top->appObj, canSaveSym, nullptr, 0);
+        if (vm.truth(ok)) {
+          uint32_t dnSym = vm.internSym("docname");
+          Oop dnOop = vm.lookupMeth(vm.oopClsId(top->appObj), dnSym)
+                    ? vm.send(top->appObj, dnSym, nullptr, 0)
+                    : kOopNil;
+          if (!isNil(dnOop) && vm.truth(dnOop)) {
+            std::string dn = vm.toStdString(dnOop);
+            out.push_back({"Save (" + dn + ")", "savedoc", nullptr});
+          }
+          out.push_back({"Save Doc As...", "savedocprompt", nullptr});
+        }
+      } catch (const TerseError&) {}
+    }
+
     out.push_back({"Edit App Code", "", [this]() { openEditAppCodeBrowser(); }});
   } else if (top->native) {
     top->native->populateAppMenu(vm, *this, *top, out);
@@ -364,8 +386,8 @@ void WindowManager::layoutDropdown(bool rightAlign) {
     if (it.label.size() > maxChars) maxChars = it.label.size();
   }
   menuW = static_cast<int16_t>(std::min<size_t>(kScreenW - 8, maxChars * kFontW + 14));
-  menuH = static_cast<int16_t>(menuItems.size() * 14 + 4);
-  if (menuH > kScreenH - 20) menuH = kScreenH - 20;
+  menuH = static_cast<int16_t>(menuItems.size() * kMenuRowH + 4);
+  if (menuH > kScreenH - 18) menuH = kScreenH - 18;
   menuX = rightAlign ? static_cast<int16_t>(kScreenW - menuW - 2) : 2;
   menuY = 16;
   menuHoverIdx = -1;
@@ -523,12 +545,12 @@ void WindowManager::renderDropdown() {
   hal.fillRect(menuX, menuY, menuW, menuH, Color::kMenuBg);
   hal.drawRect(menuX, menuY, menuW, menuH, Color::kAccent);
 
-  int maxRows = (menuH - 4) / 14;
+  int maxRows = (menuH - 4) / kMenuRowH;
   for (int i = 0; i < maxRows && i < static_cast<int>(menuItems.size()); i++) {
-    int16_t ry = static_cast<int16_t>(menuY + 2 + i * 14);
+    int16_t ry = static_cast<int16_t>(menuY + 2 + i * kMenuRowH);
     bool hov = (i == menuHoverIdx);
-    if (hov) hal.fillRect(menuX + 2, ry, menuW - 4, 13, Color::kMenuSel);
-    hal.drawTextClipped(menuX + 6, ry + 3, menuW - 10,
+    if (hov) hal.fillRect(menuX + 2, ry, menuW - 4, kMenuRowH - 1, Color::kMenuSel);
+    hal.drawTextClipped(menuX + 6, ry + 2, menuW - 10,
                         menuItems[i].label.c_str(), hov ? Color::kAccent : Color::kWhite);
   }
 }
@@ -637,7 +659,7 @@ void WindowManager::handleTouchDown(int16_t tx, int16_t ty) {
   // 2. If a Dropdown Menu is open, select item or dismiss
   if (activeMenu != 0) {
     if (tx >= menuX && tx < menuX + menuW && ty >= menuY && ty < menuY + menuH) {
-      int idx = (ty - (menuY + 2)) / 14;
+      int idx = (ty - (menuY + 2)) / kMenuRowH;
       if (idx >= 0 && idx < static_cast<int>(menuItems.size())) {
         menuHoverIdx  = idx;
         dragMode      = DragMode::DROPDOWN;
@@ -733,7 +755,7 @@ void WindowManager::handleTouchMove(int16_t tx, int16_t ty) {
   if (dragMode == DragMode::DROPDOWN && activeMenu != 0) {
     int idx = -1;
     if (tx >= menuX && tx < menuX + menuW && ty >= menuY && ty < menuY + menuH) {
-      idx = (ty - (menuY + 2)) / 14;
+      idx = (ty - (menuY + 2)) / kMenuRowH;
       if (idx < 0 || idx >= static_cast<int>(menuItems.size())) idx = -1;
     }
     if (idx != menuHoverIdx) {

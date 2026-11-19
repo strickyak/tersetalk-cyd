@@ -9,6 +9,6 @@ namespace tt {
 NativeWinController* createGraphicsPadController(const char* initialCode = nullptr);
 NativeWinController* createWorkspaceController(const char* initialCode = nullptr);
 NativeWinController* createClassBrowserController(const char* focusClassName = nullptr);
-NativeWinController* createFilesController();
+NativeWinController* createFilesController(const char* initialDir = "/sd/docs");
 
 }  // namespace tt

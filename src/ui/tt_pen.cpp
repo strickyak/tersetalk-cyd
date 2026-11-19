@@ -943,6 +943,168 @@ static Oop primBmpLifeFrom(VM& vm, Oop rcvr, const Oop* args, uint8_t) {
 }
 
 // ---------------------------------------------------------------------------
+// RLE + Base64 Marshalling for Bmp (`Bmp >> pack`, `BmpCls >> unpack:`)
+// ---------------------------------------------------------------------------
+static std::string b64EncodeBytes(const uint8_t* data, size_t len) {
+  static const char kTbl[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  std::string out;
+  out.reserve(((len + 2u) / 3u) * 4u);
+  for (size_t i = 0; i < len; i += 3u) {
+    uint32_t v = static_cast<uint32_t>(data[i]) << 16;
+    if (i + 1u < len) v |= static_cast<uint32_t>(data[i + 1u]) << 8;
+    if (i + 2u < len) v |= static_cast<uint32_t>(data[i + 2u]);
+    out.push_back(kTbl[(v >> 18) & 0x3Fu]);
+    out.push_back(kTbl[(v >> 12) & 0x3Fu]);
+    out.push_back((i + 1u < len) ? kTbl[(v >> 6) & 0x3Fu] : '=');
+    out.push_back((i + 2u < len) ? kTbl[v & 0x3Fu] : '=');
+  }
+  return out;
+}
+
+static int b64Val(unsigned char c) {
+  if (c >= 'A' && c <= 'Z') return c - 'A';
+  if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+  if (c >= '0' && c <= '9') return c - '0' + 52;
+  if (c == '+') return 62;
+  if (c == '/') return 63;
+  return -1;
+}
+
+static void b64DecodeBytes(const char* s, size_t len, std::vector<uint8_t>& out) {
+  out.clear();
+  out.reserve((len * 3u) / 4u);
+  uint32_t buf = 0;
+  int bits = 0;
+  for (size_t i = 0; i < len; i++) {
+    unsigned char c = static_cast<unsigned char>(s[i]);
+    if (c == '=') break;
+    int v = b64Val(c);
+    if (v < 0) continue;
+    buf = (buf << 6) | static_cast<uint32_t>(v);
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      out.push_back(static_cast<uint8_t>((buf >> bits) & 0xFFu));
+    }
+  }
+}
+
+static Oop primBmpPack(VM& vm, Oop rcvr, const Oop*, uint8_t) {
+  ObjBmp* b = reqBmp(vm, rcvr, "pack");
+  const size_t total = static_cast<size_t>(b->wid) * b->hei;
+  const uint8_t* pix = b->pixels;
+
+  // PackBits-style RLE:
+  //   0x80 | (run - 3) + [val]       => repeat `val` 3..130 times
+  //   0x00 | (lit - 1) + [b0..bn-1]  => literal 1..128 bytes
+  std::vector<uint8_t> rle;
+  rle.reserve(total / 4u + 32u);
+  size_t i = 0;
+  while (i < total) {
+    size_t run = 1;
+    while (i + run < total && run < 130u && pix[i + run] == pix[i]) run++;
+    if (run >= 3u) {
+      rle.push_back(static_cast<uint8_t>(0x80u | (run - 3u)));
+      rle.push_back(pix[i]);
+      i += run;
+    } else {
+      size_t lit = 1;
+      while (i + lit < total && lit < 128u) {
+        if (i + lit + 2u < total &&
+            pix[i + lit] == pix[i + lit + 1u] &&
+            pix[i + lit] == pix[i + lit + 2u]) {
+          break;
+        }
+        lit++;
+      }
+      rle.push_back(static_cast<uint8_t>(lit - 1u));
+      rle.insert(rle.end(), pix + i, pix + i + lit);
+      i += lit;
+    }
+  }
+
+  std::string b64 = b64EncodeBytes(rle.data(), rle.size());
+  uint16_t w = b->wid, h = b->hei;
+  std::string pal64;
+  if (b->palette) {
+    pal64 = b64EncodeBytes(reinterpret_cast<const uint8_t*>(b->palette), 256u * sizeof(uint16_t));
+  }
+
+  // Free vector temporary before allocating VM heap objects!
+  rle.clear();
+  rle.shrink_to_fit();
+
+  Oop d = vm.newDict(8);
+  TempRootGuard rg(vm, d);
+  vm.dictPut(d, vm.newStr("__bmp"), makeInt30(1));
+  vm.dictPut(d, vm.newStr("w"),     makeInt30(w));
+  vm.dictPut(d, vm.newStr("h"),     makeInt30(h));
+  Oop rleStr = vm.newStr(b64.data(), b64.size());
+  rg.push(rleStr);
+  vm.dictPut(d, vm.newStr("rle64"), rleStr);
+  if (!pal64.empty()) {
+    Oop pStr = vm.newStr(pal64.data(), pal64.size());
+    rg.push(pStr);
+    vm.dictPut(d, vm.newStr("pal64"), pStr);
+  }
+  return d;
+}
+
+static Oop primBmpClsUnpack(VM& vm, Oop, const Oop* args, uint8_t) {
+  if (!isObj(args[0]) || objFromOop(args[0])->format != OBJ_DICT) {
+    vm.toss("Bmp unpack: expected Dict");
+  }
+  Oop d = args[0];
+  TempRootGuard rg(vm, d);
+  int32_t w = reqNumI(vm, vm.dictGet(d, vm.newStr("w")), "Bmp unpack:");
+  int32_t h = reqNumI(vm, vm.dictGet(d, vm.newStr("h")), "Bmp unpack:");
+  Oop rleOop = vm.dictGet(d, vm.newStr("rle64"));
+  Oop palOop = vm.dictGet(d, vm.newStr("pal64"));
+  std::string rleB64 = vm.toStdString(rleOop);
+  std::string palB64 = isNil(palOop) ? "" : vm.toStdString(palOop);
+
+  Oop whArgs[2] = {makeInt30(w), makeInt30(h)};
+  Oop bmpOop = primBmpClsNew(vm, kOopNil, whArgs, 2);
+  rg.push(bmpOop);
+  auto* bmp = reinterpret_cast<ObjBmp*>(objFromOop(bmpOop));
+
+  std::vector<uint8_t> rle;
+  b64DecodeBytes(rleB64.data(), rleB64.size(), rle);
+
+  const size_t total = static_cast<size_t>(bmp->wid) * bmp->hei;
+  size_t outPos = 0;
+  size_t inPos  = 0;
+  while (inPos < rle.size() && outPos < total) {
+    uint8_t ctrl = rle[inPos++];
+    if (ctrl & 0x80u) {
+      if (inPos >= rle.size()) break;
+      size_t run = static_cast<size_t>(ctrl & 0x7Fu) + 3u;
+      uint8_t val = rle[inPos++];
+      if (outPos + run > total) run = total - outPos;
+      std::memset(bmp->pixels + outPos, val, run);
+      outPos += run;
+    } else {
+      size_t lit = static_cast<size_t>(ctrl) + 1u;
+      if (inPos + lit > rle.size()) lit = rle.size() - inPos;
+      if (outPos + lit > total) lit = total - outPos;
+      std::memcpy(bmp->pixels + outPos, rle.data() + inPos, lit);
+      inPos  += lit;
+      outPos += lit;
+    }
+  }
+
+  if (!palB64.empty()) {
+    std::vector<uint8_t> palBytes;
+    b64DecodeBytes(palB64.data(), palB64.size(), palBytes);
+    if (palBytes.size() >= 256u * sizeof(uint16_t)) {
+      ensureCustomPalette(vm, bmp);
+      std::memcpy(bmp->palette, palBytes.data(), 256u * sizeof(uint16_t));
+    }
+  }
+  return bmpOop;
+}
+
+// ---------------------------------------------------------------------------
 // Window Handle (`Win`) Primitives
 // ---------------------------------------------------------------------------
 static Window* reqWindow(VM& vm, Oop rcvr) {
@@ -974,20 +1136,19 @@ static Oop primWinClsOpenRect(VM& vm, Oop, const Oop* args, uint8_t) {
   return w ? w->winObj : kOopNil;
 }
 
-static Oop primWinClsPrompt(VM& vm, Oop rcvr, const Oop* args, uint8_t) {
+static Oop runWinPrompt(VM& vm, Oop rcvr, const Oop* args, bool isMultiline) {
   if (!gWm) return rcvr;
   std::string title = vm.toStdString(args[0]);
   std::string init  = vm.toStdString(args[1]);
   Oop blk = args[2];
   if (!isObj(blk) || objFromOop(blk)->format != OBJ_BLK) {
-    vm.toss("Win prompt:init:then: expected Blk");
+    vm.toss("Win prompt expected Blk");
   }
-  // Store callback block in globalsDict under internal key `__prompt_blk` so GC traces it!
   uint32_t pSym = vm.internSym("__prompt_blk");
   vm.dictPut(vm.globalsDict, makeSym(pSym), blk);
   VM* vmPtr = &vm;
   WindowManager* wmPtr = gWm;
-  gWm->openTextPrompt(title.c_str(), init, false, [vmPtr, wmPtr, pSym](const std::string& result) {
+  gWm->openTextPrompt(title.c_str(), init, isMultiline, [vmPtr, wmPtr, pSym](const std::string& result) {
     Oop b = vmPtr->dictGet(vmPtr->globalsDict, makeSym(pSym));
     vmPtr->dictDel(vmPtr->globalsDict, makeSym(pSym));
     if (isObj(b) && objFromOop(b)->format == OBJ_BLK) {
@@ -1002,6 +1163,21 @@ static Oop primWinClsPrompt(VM& vm, Oop rcvr, const Oop* args, uint8_t) {
       wmPtr->invalidateAll();
     }
   });
+  return rcvr;
+}
+
+static Oop primWinClsPrompt(VM& vm, Oop rcvr, const Oop* args, uint8_t) {
+  return runWinPrompt(vm, rcvr, args, false);
+}
+
+static Oop primWinClsPromptMulti(VM& vm, Oop rcvr, const Oop* args, uint8_t) {
+  return runWinPrompt(vm, rcvr, args, true);
+}
+
+static Oop primWinClsBanner(VM& vm, Oop rcvr, const Oop* args, uint8_t) {
+  if (gWm) {
+    gWm->showBanner(vm.toStdString(args[0]));
+  }
   return rcvr;
 }
 
@@ -1158,6 +1334,7 @@ void installGraphicsPrimitives(VM& vm, DisplayHal* hal, WindowManager* wm) {
 
   // Bmp
   vm.addPrim(CLS_BMP_CLS, "wid:hei:", "new:hei:",   primBmpClsNew);
+  vm.addPrim(CLS_BMP_CLS, "unpack:",  "",           primBmpClsUnpack);
   vm.addPrim(CLS_BMP, "wid",          "w",          primBmpWid);
   vm.addPrim(CLS_BMP, "hei",          "h",          primBmpHei);
   vm.addPrim(CLS_BMP, "clear",        "",           primBmpClear);
@@ -1169,6 +1346,7 @@ void installGraphicsPrimitives(VM& vm, DisplayHal* hal, WindowManager* wm) {
   vm.addPrim(CLS_BMP, "at:put:",      "",           primBmpAtPtPut);
   vm.addPrim(CLS_BMP, "pal:color:",   "",           primBmpPalRgb999);
   vm.addPrim(CLS_BMP, "pen",          "",           primBmpPen);
+  vm.addPrim(CLS_BMP, "pack",         "",           primBmpPack);
   vm.addPrim(CLS_BMP, "mandel:span:max:", "",       primBmpMandel);
   vm.addPrim(CLS_BMP, "lifeFrom:",    "",           primBmpLifeFrom);
 
@@ -1176,6 +1354,8 @@ void installGraphicsPrimitives(VM& vm, DisplayHal* hal, WindowManager* wm) {
   vm.addPrim(CLS_WIN_CLS, "open:title:", "",        primWinClsOpenTitle);
   vm.addPrim(CLS_WIN_CLS, "open:title:at:size:", "", primWinClsOpenRect);
   vm.addPrim(CLS_WIN_CLS, "prompt:init:then:", "",  primWinClsPrompt);
+  vm.addPrim(CLS_WIN_CLS, "promptMulti:init:then:", "", primWinClsPromptMulti);
+  vm.addPrim(CLS_WIN_CLS, "banner:",  "",           primWinClsBanner);
   vm.addPrim(CLS_WIN, "title:",       "",           primWinTitleSet);
   vm.addPrim(CLS_WIN, "dirty",        "redraw",     primWinDirty);
   vm.addPrim(CLS_WIN, "every:",       "",           primWinEvery);
